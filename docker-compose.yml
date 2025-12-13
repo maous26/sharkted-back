@@ -1,0 +1,108 @@
+services:
+  api:
+    build: .
+    container_name: sharkted-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql+psycopg://sharkted:sharkted@db:5432/sharkted
+      - JWT_SECRET=change_me_now
+    depends_on:
+      - db
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+
+  db:
+    image: postgres:16
+    container_name: sharkted-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sharkted
+      POSTGRES_USER: sharkted
+      POSTGRES_PASSWORD: sharkted
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: sharkted-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  
+  worker_high:
+    build: .
+    container_name: sharkted-worker-high
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=postgresql+psycopg://sharkted:sharkted@db:5432/sharkted
+      - JWT_SECRET=change_me_now
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    command: ["python", "worker.py", "high"]
+
+  worker_default:
+    build: .
+    container_name: sharkted-worker-default
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=postgresql+psycopg://sharkted:sharkted@db:5432/sharkted
+      - JWT_SECRET=change_me_now
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    command: ["python", "worker.py", "default"]
+
+  worker_low:
+    build: .
+    container_name: sharkted-worker-low
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=postgresql+psycopg://sharkted:sharkted@db:5432/sharkted
+      - JWT_SECRET=change_me_now
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    command: ["python", "worker.py", "low"]
+
+
+
+  scheduler:
+    build: .
+    container_name: sharkted-scheduler
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg://sharkted:sharkted@db:5432/sharkted
+      - JWT_SECRET=change_me_now
+    depends_on:
+      - redis
+    command: ["rqscheduler", "--url", "redis://redis:6379/0", "--interval", "5"]
+
+
+
+
+
+volumes:
+  pgdata:
+

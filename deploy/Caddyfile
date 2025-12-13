@@ -1,0 +1,103 @@
+# =============================================================================
+# Sharkted API - Caddy Configuration
+# =============================================================================
+#
+# Caddy fournit automatiquement:
+# - HTTPS avec Let's Encrypt (certificat auto)
+# - HTTP/2
+# - Compression gzip/zstd
+#
+# Installation sur VPS Ubuntu:
+#   sudo apt update
+#   sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+#   sudo apt update
+#   sudo apt install caddy
+#
+# Déploiement:
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo caddy reload --config /etc/caddy/Caddyfile
+#
+# =============================================================================
+
+# API Backend
+api.sharkted.fr {
+    # Reverse proxy vers l'API
+    reverse_proxy 127.0.0.1:3000 {
+        # Headers pour identifier le client réel
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Compression
+    encode zstd gzip
+
+    # Security Headers
+    header {
+        # Prevent clickjacking
+        X-Frame-Options "DENY"
+        # Prevent MIME sniffing
+        X-Content-Type-Options "nosniff"
+        # Referrer policy
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Permissions policy (disable dangerous features)
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        # Remove server header
+        -Server
+    }
+
+    # Rate limiting basique (Caddy level)
+    # Pour un vrai rate limit, utiliser le rate_limiter.py côté API
+
+    # Logs
+    log {
+        output file /var/log/caddy/api.sharkted.fr.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+    }
+}
+
+# Option: Frontend sur le même domaine
+# sharkted.fr {
+#     # Servir les fichiers statiques du frontend
+#     root * /var/www/sharkted/dist
+#     file_server
+#
+#     # SPA: fallback sur index.html
+#     try_files {path} /index.html
+#
+#     # Compression
+#     encode zstd gzip
+#
+#     # Security Headers
+#     header {
+#         X-Frame-Options "DENY"
+#         X-Content-Type-Options "nosniff"
+#         Referrer-Policy "strict-origin-when-cross-origin"
+#         # CSP pour le frontend (ajuster selon tes besoins)
+#         Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https:; connect-src 'self' https://api.sharkted.fr"
+#     }
+#
+#     log {
+#         output file /var/log/caddy/sharkted.fr.log
+#     }
+# }
+
+# Option: API sur sous-chemin (si tu veux tout sur un domaine)
+# sharkted.fr {
+#     # API sur /api/*
+#     handle /api/* {
+#         uri strip_prefix /api
+#         reverse_proxy 127.0.0.1:3000
+#     }
+#
+#     # Frontend pour tout le reste
+#     handle {
+#         root * /var/www/sharkted/dist
+#         file_server
+#         try_files {path} /index.html
+#     }
+# }
