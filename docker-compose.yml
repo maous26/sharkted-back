@@ -1,10 +1,24 @@
 services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: sharkted-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
   api:
     build: .
     container_name: sharkted-api
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - DATABASE_URL=postgresql+psycopg://sharkted:sharkted@db:5432/sharkted
       - JWT_SECRET=change_me_now
@@ -105,4 +119,6 @@ services:
 
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:
 

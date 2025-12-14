@@ -22,6 +22,7 @@ from app.routers.auth import router as auth_router
 from app.routers.deals import router as deals_router
 from app.routers.sources import router as sources_router
 from app.routers.collect import router as collect_router
+from app.routers.alerts import router as alerts_router
 from app.core.config import JWT_SECRET, JWT_ALGO
 from app.services.deal_service import (
     get_deal,
@@ -58,14 +59,20 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS Configuration - Production-ready
-ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080").split(",")
+# CORS Configuration
+ALLOWED_ORIGINS = [
+    "https://sharkted-front-production.up.railway.app",
+    "https://sharkted.fr",
+    "https://www.sharkted.fr",
+    "http://localhost:3000",
+    "http://localhost:3001",
+]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
     expose_headers=["X-Request-ID", "X-Response-Time"],
 )
@@ -80,6 +87,10 @@ async def add_request_context(request: Request, call_next):
     """Add trace_id and timing to all requests."""
     trace_id = set_trace_id()
     start_time = time.perf_counter()
+
+    # Debug CORS - log Origin header for all requests
+    origin = request.headers.get("origin", "NO_ORIGIN")
+    logger.info(f"CORS_DEBUG method={request.method} origin={origin} path={request.url.path} headers={dict(request.headers)}")
 
     response = await call_next(request)
 
@@ -115,6 +126,17 @@ queue_low = Queue("low", connection=redis_conn)
 def health():
     """Health check endpoint for load balancers & monitoring."""
     return {"status": "ok"}
+
+
+@app.get("/debug/headers")
+async def debug_headers(request: Request):
+    """Debug endpoint to see what headers the API receives."""
+    return {
+        "headers": dict(request.headers),
+        "method": request.method,
+        "url": str(request.url),
+        "client": request.client.host if request.client else None,
+    }
 
 
 @app.get("/v1/info")
@@ -193,6 +215,7 @@ app.include_router(auth_router)
 app.include_router(deals_router)      # /v1/deals/*
 app.include_router(sources_router)    # /v1/sources/*
 app.include_router(collect_router)    # /v1/collect/*
+app.include_router(alerts_router)     # /v1/alerts/*
 
 def get_user_from_creds(creds):
     """
