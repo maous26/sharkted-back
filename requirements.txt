@@ -15,3 +15,8 @@ rq-scheduler==0.13.1
 
 requests==2.32.3
 cloudscraper==1.2.71
+
+# New dependencies for scoring system
+httpx==0.26.0
+loguru==0.7.2
+statistics

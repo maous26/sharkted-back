@@ -1,0 +1,5 @@
+{
+  "_comment": "Configuration des proxies pour Sharkted - Remplacer les valeurs YOUR_* par vos credentials",
+  "datacenter": [],
+  "residential": []
+}

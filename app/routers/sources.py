@@ -2,10 +2,14 @@
 Sources Router - Administration des sources de collecte.
 Endpoints: /v1/sources/*
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
+import os
+
+from rq import Queue
+import redis
 
 from app.core.source_policy import (
     get_policy,
@@ -14,6 +18,19 @@ from app.core.source_policy import (
     unblock_source,
     SOURCE_POLICIES,
 )
+from app.services.scraping_service import (
+    get_scraping_logs,
+    delete_scraping_log,
+    delete_old_scraping_logs,
+    get_enabled_sources,
+)
+from app.services.proxy_service import get_proxy_pool
+from app.jobs_scraping import scrape_source, scrape_all_sources
+
+# Redis connection
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+redis_conn = redis.from_url(REDIS_URL)
+queue_default = Queue("default", connection=redis_conn)
 
 # In-memory settings (would be stored in DB in production)
 _scraping_settings = {
@@ -23,9 +40,6 @@ _scraping_settings = {
     "min_margin_percent": 15,
     "min_flip_score": 50,
 }
-
-# In-memory logs storage (would be stored in DB in production)
-_scraping_logs = []
 
 router = APIRouter(prefix="/v1/sources", tags=["sources"])
 
@@ -52,7 +66,6 @@ def get_sources_status():
             "last_error": m.last_error_type if m.last_error_type else None,
             "total_deals_found": m.total_success,
             "plan_required": "free",
-            # Additional fields for detailed view
             "enabled": policy.enabled,
             "configured_mode": policy.mode.value,
             "current_mode": m.current_mode.value,
@@ -125,6 +138,58 @@ def unblock_source_endpoint(source: str):
 
 
 # =============================================================================
+# SCRAPING ENDPOINT
+# =============================================================================
+
+class ScrapeRequest(BaseModel):
+    sources: Optional[List[str]] = None
+    send_alerts: bool = True
+    max_products: int = 30
+
+
+@router.post("/scrape")
+def run_scraping(request: ScrapeRequest, background_tasks: BackgroundTasks):
+    """
+    Lance le scraping des sources.
+    
+    Args:
+        sources: Liste des sources à scraper (None = toutes les activées)
+        send_alerts: Envoyer des alertes pour les nouveaux deals
+        max_products: Nombre max de produits par source
+    
+    Returns:
+        Job ID et status
+    """
+    # Déterminer les sources
+    if request.sources:
+        sources_to_scrape = [s for s in request.sources if s in SOURCE_POLICIES]
+        if not sources_to_scrape:
+            raise HTTPException(status_code=400, detail="No valid sources provided")
+    else:
+        sources_to_scrape = get_enabled_sources()
+    
+    if not sources_to_scrape:
+        raise HTTPException(status_code=400, detail="No enabled sources to scrape")
+    
+    # Enqueue le job
+    job = queue_default.enqueue(
+        scrape_all_sources,
+        sources_to_scrape,
+        request.max_products,
+        job_timeout=1800,  # 30 minutes max
+        result_ttl=3600,
+    )
+    
+    return {
+        "status": "enqueued",
+        "job_id": job.id,
+        "sources": sources_to_scrape,
+        "max_products_per_source": request.max_products,
+        "message": f"Scraping started for {len(sources_to_scrape)} source(s)",
+    }
+
+
+# =============================================================================
 # SETTINGS ENDPOINTS
 # =============================================================================
 
@@ -169,52 +234,42 @@ def get_logs(
     page_size: int = Query(20, ge=1, le=100),
 ):
     """Get scraping logs with pagination."""
-    start = (page - 1) * page_size
-    end = start + page_size
-
-    logs = _scraping_logs[start:end]
-
-    return {
-        "logs": logs,
-        "total": len(_scraping_logs),
-        "page": page,
-        "page_size": page_size,
-        "total_pages": (len(_scraping_logs) + page_size - 1) // page_size if _scraping_logs else 0,
-    }
+    return get_scraping_logs(page, page_size)
 
 
 @router.delete("/logs/{log_id}")
 def delete_log(log_id: str):
     """Delete a specific log entry."""
-    global _scraping_logs
-    original_len = len(_scraping_logs)
-    _scraping_logs = [log for log in _scraping_logs if log.get("id") != log_id]
-
-    if len(_scraping_logs) == original_len:
+    if not delete_scraping_log(log_id):
         raise HTTPException(status_code=404, detail="Log not found")
-
     return {"message": "Log deleted", "id": log_id}
 
 
 @router.delete("/logs")
 def delete_old_logs(older_than_days: int = Query(..., ge=1)):
     """Delete logs older than specified days."""
-    global _scraping_logs
-    from datetime import timedelta
-
-    cutoff = datetime.utcnow() - timedelta(days=older_than_days)
-    original_len = len(_scraping_logs)
-
-    _scraping_logs = [
-        log for log in _scraping_logs
-        if datetime.fromisoformat(log.get("timestamp", "2099-01-01")) > cutoff
-    ]
-
-    deleted = original_len - len(_scraping_logs)
+    deleted = delete_old_scraping_logs(older_than_days)
     return {"message": f"Deleted {deleted} logs older than {older_than_days} days"}
 
 
+# =============================================================================
+# PROXY ENDPOINTS
+# =============================================================================
+
 @router.post("/proxies/reload")
 def reload_proxies():
-    """Reload proxy list (placeholder)."""
-    return {"message": "Proxies reloaded", "count": 0}
+    """Reload proxy pool."""
+    pool = get_proxy_pool()
+    pool.initialize()
+    stats = pool.get_stats()
+    return {
+        "message": "Proxies reloaded",
+        "stats": stats,
+    }
+
+
+@router.get("/proxies/stats")
+def get_proxy_stats():
+    """Get proxy pool statistics."""
+    pool = get_proxy_pool()
+    return pool.get_stats()

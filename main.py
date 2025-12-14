@@ -23,6 +23,9 @@ from app.routers.deals import router as deals_router
 from app.routers.sources import router as sources_router
 from app.routers.collect import router as collect_router
 from app.routers.alerts import router as alerts_router
+from app.routers.scoring import router as scoring_router
+from app.routers.admin import router as admin_router
+from app.routers.proxies import router as proxies_router
 from app.core.config import JWT_SECRET, JWT_ALGO
 from app.services.deal_service import (
     get_deal,
@@ -51,6 +54,7 @@ logger = get_logger(__name__)
 API_VERSION = "1.0.0"
 API_TITLE = "Sharkted API"
 
+from app.scheduler import setup_scheduled_jobs
 app = FastAPI(
     title=API_TITLE,
     version=API_VERSION,
@@ -59,6 +63,15 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+
+# Startup event - configure scheduled jobs
+@app.on_event("startup")
+async def startup_event():
+    try:
+        setup_scheduled_jobs()
+        logger.info("Scheduled jobs configured")
+    except Exception as e:
+        logger.warning(f"Failed to setup scheduled jobs: {e}")
 # CORS Configuration
 ALLOWED_ORIGINS = [
     "https://sharkted-front-production.up.railway.app",
@@ -216,6 +229,9 @@ app.include_router(deals_router)      # /v1/deals/*
 app.include_router(sources_router)    # /v1/sources/*
 app.include_router(collect_router)    # /v1/collect/*
 app.include_router(alerts_router)     # /v1/alerts/*
+app.include_router(scoring_router)    # /v1/scoring/*
+app.include_router(admin_router)
+app.include_router(proxies_router)      # /v1/proxies/*
 
 def get_user_from_creds(creds):
     """

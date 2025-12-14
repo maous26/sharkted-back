@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, asc
 
 from app.db.session import SessionLocal
@@ -30,29 +30,11 @@ def get_db_session():
 
 
 def persist_deal(item: DealItem) -> Dict[str, Any]:
-    """
-    Persiste un deal collecté en base.
-
-    Args:
-        item: DealItem normalisé depuis un collector
-
-    Returns:
-        Dict avec infos sur l'opération:
-        - id: ID du deal en base
-        - source: source du deal
-        - external_id: ID externe
-        - action: "created" ou "updated"
-        - price_changed: True si le prix a changé
-    """
     with get_db_session() as session:
         repo = DealRepository(session)
-
-        # Check si existait avant
         existing = repo.get_by_source_and_id(item.source, item.external_id)
         was_existing = existing is not None
         old_price = existing.price if existing else None
-
-        # Upsert
         deal = repo.upsert(item)
 
         return {
@@ -67,12 +49,6 @@ def persist_deal(item: DealItem) -> Dict[str, Any]:
 
 
 def persist_deals_batch(items: List[DealItem]) -> List[Dict[str, Any]]:
-    """
-    Persiste une liste de deals.
-
-    Returns:
-        Liste de résultats pour chaque deal
-    """
     results = []
     with get_db_session() as session:
         repo = DealRepository(session)
@@ -80,9 +56,7 @@ def persist_deals_batch(items: List[DealItem]) -> List[Dict[str, Any]]:
             existing = repo.get_by_source_and_id(item.source, item.external_id)
             was_existing = existing is not None
             old_price = existing.price if existing else None
-
             deal = repo.upsert(item)
-
             results.append({
                 "id": deal.id,
                 "source": deal.source,
@@ -90,19 +64,15 @@ def persist_deals_batch(items: List[DealItem]) -> List[Dict[str, Any]]:
                 "action": "updated" if was_existing else "created",
                 "price_changed": was_existing and old_price != deal.price,
             })
-
     return results
 
 
 def get_deal(source: str, external_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Récupère un deal par sa clé logique.
-    """
     with get_db_session() as session:
         repo = DealRepository(session)
         deal = repo.get_by_source_and_id(source, external_id)
         if deal:
-            return _deal_to_dict(deal)
+            return _deal_to_api_dict(deal)
         return None
 
 
@@ -113,9 +83,6 @@ def get_deals_by_source(
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Récupère les deals d'une source.
-    """
     with get_db_session() as session:
         repo = DealRepository(session)
         deals = repo.get_by_source(
@@ -125,20 +92,16 @@ def get_deals_by_source(
             min_price=min_price,
             max_price=max_price,
         )
-        return [_deal_to_dict(d) for d in deals]
+        return [_deal_to_api_dict(d) for d in deals]
 
 
 def get_source_stats() -> Dict[str, int]:
-    """
-    Statistiques par source.
-    """
     with get_db_session() as session:
         from sqlalchemy import func
         result = session.query(
             Deal.source,
             func.count(Deal.id)
         ).group_by(Deal.source).all()
-
         return {source: count for source, count in result}
 
 
@@ -152,26 +115,12 @@ def get_all_deals(
     sort_by: str = "last_seen_at",
     sort_order: str = "desc",
 ) -> Dict[str, Any]:
-    """
-    Récupère tous les deals avec filtres et tri.
-
-    Args:
-        limit: Nombre max de résultats
-        offset: Offset pour pagination
-        source: Filtrer par source (optionnel)
-        min_price: Prix minimum (optionnel)
-        max_price: Prix maximum (optionnel)
-        currency: Filtrer par devise (optionnel)
-        sort_by: Champ de tri (price, last_seen_at, first_seen_at)
-        sort_order: Ordre (asc, desc)
-
-    Returns:
-        Dict avec deals, total, et métadonnées
-    """
     with get_db_session() as session:
-        query = session.query(Deal).filter(Deal.in_stock == True)
+        query = session.query(Deal).options(
+            joinedload(Deal.vinted_stats),
+            joinedload(Deal.score_data)
+        ).filter(Deal.in_stock == True)
 
-        # Filtres
         if source:
             query = query.filter(Deal.source == source)
         if min_price is not None:
@@ -181,21 +130,18 @@ def get_all_deals(
         if currency:
             query = query.filter(Deal.currency == currency)
 
-        # Count total avant pagination
         total = query.count()
 
-        # Tri
         sort_column = getattr(Deal, sort_by, Deal.last_seen_at)
         if sort_order == "asc":
             query = query.order_by(asc(sort_column))
         else:
             query = query.order_by(desc(sort_column))
 
-        # Pagination
         deals = query.offset(offset).limit(limit).all()
 
         return {
-            "deals": [_deal_to_dict(d) for d in deals],
+            "deals": [_deal_to_api_dict(d) for d in deals],
             "total": total,
             "limit": limit,
             "offset": offset,
@@ -204,41 +150,69 @@ def get_all_deals(
 
 
 def get_recent_deals(hours: int = 24, limit: int = 50) -> List[Dict[str, Any]]:
-    """
-    Récupère les deals vus récemment (fraîcheur).
-    """
     with get_db_session() as session:
         cutoff = datetime.utcnow() - timedelta(hours=hours)
-
         deals = (
             session.query(Deal)
+            .options(joinedload(Deal.vinted_stats), joinedload(Deal.score_data))
             .filter(Deal.last_seen_at >= cutoff)
             .filter(Deal.in_stock == True)
             .order_by(Deal.last_seen_at.desc())
             .limit(limit)
             .all()
         )
-        return [_deal_to_dict(d) for d in deals]
+        return [_deal_to_api_dict(d) for d in deals]
 
 
-def _deal_to_dict(deal: Deal) -> Dict[str, Any]:
-    """Convertit un Deal en dict."""
-    return {
-        "id": deal.id,
-        "source": deal.source,
-        "external_id": deal.external_id,
-        "title": deal.title,
-        "price": deal.price,
-        "currency": deal.currency,
-        "url": deal.url,
-        "image_url": deal.image_url,
-        "seller_name": deal.seller_name,
-        "location": deal.location,
+def _deal_to_api_dict(deal: Deal) -> Dict[str, Any]:
+    """Convertit un Deal en dict format API (compatible frontend)."""
+    result = {
+        "id": str(deal.id),
+        "product_name": deal.title,
+        "brand": deal.brand or deal.seller_name,
+        "model": getattr(deal, 'model', None),
+        "category": getattr(deal, 'category', None),
+        "color": getattr(deal, 'color', None),
+        "gender": getattr(deal, 'gender', None),
         "original_price": deal.original_price,
-        "discount_percent": deal.discount_percent,
-        "in_stock": deal.in_stock,
-        "score": deal.score,
-        "first_seen_at": deal.first_seen_at.isoformat() if deal.first_seen_at else None,
-        "last_seen_at": deal.last_seen_at.isoformat() if deal.last_seen_at else None,
-        "price_updated_at": deal.price_updated_at.isoformat() if deal.price_updated_at else None,
+        "sale_price": deal.price,
+        "discount_pct": deal.discount_percent,
+        "product_url": deal.url,
+        "image_url": deal.image_url,
+        "sizes_available": getattr(deal, 'sizes_available', None),
+        "stock_available": deal.in_stock,
+        "source_name": deal.source,
+        "detected_at": deal.first_seen_at.isoformat() if deal.first_seen_at else None,
     }
+    
+    # Ajouter les stats Vinted si disponibles
+    if hasattr(deal, 'vinted_stats') and deal.vinted_stats:
+        vs = deal.vinted_stats
+        result["vinted_stats"] = {
+            "nb_listings": vs.nb_listings,
+            "price_min": vs.price_min,
+            "price_max": vs.price_max,
+            "price_median": vs.price_median,
+            "margin_euro": vs.margin_euro,
+            "margin_pct": vs.margin_pct,
+            "liquidity_score": vs.liquidity_score,
+        }
+    else:
+        result["vinted_stats"] = None
+    
+    # Ajouter le score si disponible
+    if hasattr(deal, 'score_data') and deal.score_data:
+        sd = deal.score_data
+        result["score"] = {
+            "flip_score": sd.flip_score,
+            "recommended_action": sd.recommended_action,
+            "recommended_price": sd.recommended_price,
+            "confidence": sd.confidence,
+            "explanation_short": sd.explanation_short,
+            "risks": sd.risks,
+            "estimated_sell_days": sd.estimated_sell_days,
+        }
+    else:
+        result["score"] = None
+    
+    return result
