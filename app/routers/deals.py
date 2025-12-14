@@ -168,15 +168,21 @@ def deals_stats_score_distribution():
             (80, 100, "80-100"),
         ]
 
-        # Return array format expected by frontend
+        # Get counts for each range
         distribution = []
+        total = 0
         for min_score, max_score, label in ranges:
             count = session.query(func.count(Deal.id)).filter(
                 Deal.in_stock == True,
                 Deal.score >= min_score,
                 Deal.score < max_score if max_score < 100 else Deal.score <= 100
             ).scalar() or 0
-            distribution.append({"range": label, "count": count})
+            distribution.append({"range_label": label, "count": count})
+            total += count
+
+        # Calculate percentages
+        for item in distribution:
+            item["percentage"] = round((item["count"] / total * 100) if total > 0 else 0, 1)
 
         return distribution
 
