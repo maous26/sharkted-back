@@ -1,6 +1,6 @@
 """
-Scraper KITH EU - Shopify JSON API avec scoring instantané.
-Collections: footwear-sale, apparel-sale, kids-footwear-sale
+Scraper KITH EU - Mode batch (sans scoring temps réel).
+Les deals sont stockés EN ATTENTE et scorés par le batch job.
 """
 
 import httpx
@@ -10,15 +10,7 @@ from typing import Dict, Any, List, Optional
 from loguru import logger
 
 from app.normalizers.item import DealItem
-from app.services.instant_scoring_service import (
-    score_deal_instant_sync,
-    should_persist_deal,
-    MIN_SCORE_THRESHOLD,
-)
-from app.db.session import SessionLocal
-from app.models.vinted_stats import VintedStats
-from app.models.deal_score import DealScore
-from app.repositories.deal_repository import DealRepository
+from app.services.deal_service import persist_deal
 
 
 KITH_BASE_URL = "https://eu.kith.com"
@@ -35,63 +27,8 @@ HEADERS = {
 }
 
 
-def persist_kith_deal_with_score(item: DealItem, vinted_data: Dict, score_data: Dict, session) -> Dict:
-    """Persiste un deal KITH avec son score."""
-    repo = DealRepository(session)
-    existing = repo.get_by_source_and_id(item.source, item.external_id)
-    was_existing = existing is not None
-    
-    deal = repo.upsert(item)
-    deal_id = deal.id
-    
-    # Stats Vinted
-    if vinted_data:
-        existing_vinted = session.query(VintedStats).filter(VintedStats.deal_id == deal_id).first()
-        if not existing_vinted:
-            vinted_stats = VintedStats(
-                deal_id=deal_id,
-                nb_listings=vinted_data.get('nb_listings', 0),
-                price_min=vinted_data.get('price_min'),
-                price_max=vinted_data.get('price_max'),
-                price_avg=vinted_data.get('price_avg'),
-                price_median=vinted_data.get('price_median'),
-                margin_euro=vinted_data.get('margin_euro'),
-                margin_pct=vinted_data.get('margin_pct'),
-                liquidity_score=vinted_data.get('liquidity_score'),
-                sample_listings=vinted_data.get('sample_listings', []),
-            )
-            session.add(vinted_stats)
-    
-    # Score
-    if score_data:
-        existing_score = session.query(DealScore).filter(DealScore.deal_id == deal_id).first()
-        if not existing_score:
-            deal_score = DealScore(
-                deal_id=deal_id,
-                flip_score=score_data.get('flip_score', 0),
-                margin_score=score_data.get('margin_score'),
-                liquidity_score=score_data.get('liquidity_score'),
-                popularity_score=score_data.get('popularity_score'),
-                recommended_action=score_data.get('recommended_action'),
-                recommended_price=score_data.get('recommended_price'),
-                confidence=score_data.get('confidence'),
-                explanation=score_data.get('explanation'),
-                explanation_short=score_data.get('explanation_short'),
-                risks=score_data.get('risks', []),
-                score_breakdown=score_data.get('score_breakdown', {}),
-                model_version='v2_instant',
-            )
-            session.add(deal_score)
-    
-    return {
-        "id": deal_id,
-        "action": "updated" if was_existing else "created",
-        "flip_score": score_data.get('flip_score', 0) if score_data else 0,
-    }
-
-
-def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250, min_score: int = MIN_SCORE_THRESHOLD) -> Dict[str, Any]:
-    """Scrape une collection KITH EU avec scoring instantané."""
+def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250) -> Dict[str, Any]:
+    """Scrape une collection KITH EU (mode batch - sans scoring)."""
     url = f"{KITH_BASE_URL}/collections/{collection}/products.json"
     
     all_products = []
@@ -122,41 +59,20 @@ def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250,
                     
                 page += 1
         
-        # Process products avec scoring instantané
+        # Stocker les deals (sans scoring - sera fait par le batch)
         deals_saved = 0
         deals_skipped = 0
-        scoring_errors = 0
         
-        session = SessionLocal()
-        
-        try:
-            for product in all_products:
-                deal_item = parse_kith_product(product, collection)
-                if not deal_item:
-                    continue
-                
-                # Score instantané
-                vinted_data, score_data, flip_score = score_deal_instant_sync(deal_item)
-                
-                if not score_data:
-                    scoring_errors += 1
-                    continue
-                
-                # Filtrer les mauvais scores
-                if not should_persist_deal(flip_score, min_score):
-                    deals_skipped += 1
-                    logger.debug(f"KITH deal skipped (score {flip_score:.1f})", title=deal_item.title[:30])
-                    continue
-                
-                # Persister avec score
-                persist_kith_deal_with_score(deal_item, vinted_data, score_data, session)
-                session.commit()
+        for product in all_products:
+            deal_item = parse_kith_product(product, collection)
+            if not deal_item:
+                deals_skipped += 1
+                continue
+            
+            result = persist_deal(deal_item)
+            if result.get("action") == "created":
                 deals_saved += 1
-                
-                logger.info(f"KITH deal saved with score {flip_score:.1f}", title=deal_item.title[:30])
-                
-        finally:
-            session.close()
+                logger.debug(f"KITH deal saved (pending scoring): {deal_item.title[:40]}")
         
         return {
             "status": "success",
@@ -165,8 +81,7 @@ def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250,
             "products_found": len(all_products),
             "deals_saved": deals_saved,
             "deals_skipped": deals_skipped,
-            "scoring_errors": scoring_errors,
-            "min_score_threshold": min_score,
+            "pending_scoring": deals_saved,  # Ces deals attendent le batch
         }
         
     except Exception as e:
@@ -244,15 +159,15 @@ def parse_kith_product(product: Dict, collection: str) -> Optional[DealItem]:
         return None
 
 
-def collect_all_kith(min_score: int = MIN_SCORE_THRESHOLD) -> Dict[str, Any]:
-    """Scrape toutes les collections KITH avec scoring instantané."""
-    results = {"collections": {}, "total_deals": 0, "total_skipped": 0}
+def collect_all_kith() -> Dict[str, Any]:
+    """Scrape toutes les collections KITH (mode batch)."""
+    results = {"collections": {}, "total_deals": 0, "total_pending": 0}
     
     for collection in KITH_COLLECTIONS:
-        result = collect_kith_collection(collection, min_score=min_score)
+        result = collect_kith_collection(collection)
         results["collections"][collection] = result
         results["total_deals"] += result.get("deals_saved", 0)
-        results["total_skipped"] += result.get("deals_skipped", 0)
+        results["total_pending"] += result.get("pending_scoring", 0)
     
-    logger.info(f"KITH total: {results['total_deals']} deals saved, {results['total_skipped']} skipped (score < {min_score})")
+    logger.info(f"KITH total: {results['total_deals']} deals saved (pending scoring)")
     return results

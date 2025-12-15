@@ -133,6 +133,11 @@ def list_all_deals(
         # Only in stock
         query = query.filter(Deal.in_stock == True)
         
+        # IMPORTANT: Only show deals that have been scored (score >= 60)
+        # Deals without score are "pending" and not visible yet
+        query = query.filter(DealScore.id != None)  # Must have a score
+        query = query.filter(DealScore.flip_score >= 60)  # Score must be >= 60
+        
         # Count total before pagination
         total = query.count()
         

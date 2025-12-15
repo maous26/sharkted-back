@@ -1,5 +1,10 @@
 """
 Scheduler - Configuration des jobs planifiés.
+
+Nouveau flow batch (toutes les 15 min):
+1. Scraper les sources -> deals en attente
+2. Batch Vinted -> stats pour les deals en attente  
+3. Batch scoring -> score et filtre (supprime si < 60)
 """
 import os
 from datetime import datetime, timedelta, timezone
@@ -21,17 +26,18 @@ def setup_scheduled_jobs():
     for job in scheduler.get_jobs():
         scheduler.cancel(job)
     
-    # 1. Scraping sources existantes (Courir, JD, etc.) - 30 min
+    # 1. CYCLE COMPLET toutes les 15 min
+    # (scraping sources + batch Vinted + batch scoring)
     from app.jobs_scraping import scheduled_scraping
     scheduler.schedule(
-        scheduled_time=datetime.now(timezone.utc) + timedelta(minutes=5),
+        scheduled_time=datetime.now(timezone.utc) + timedelta(minutes=2),
         func=scheduled_scraping,
-        interval=1800,
+        interval=900,  # 15 minutes
         repeat=None,
         result_ttl=3600,
         queue_name="default",
     )
-    logger.info("Scheduled: scraping every 30 min")
+    logger.info("Scheduled: full cycle (scrape+vinted+score) every 15 min")
     
     # 2. KITH scraping - toutes les 2 heures
     from app.jobs_kith import collect_all_kith
@@ -45,20 +51,31 @@ def setup_scheduled_jobs():
     )
     logger.info("Scheduled: KITH every 2 hours")
     
-    # 3. Rescraping Vinted stats - 15 min
-    from app.jobs_scoring import rescore_deals_batch
+    # 3. Batch Vinted supplémentaire (rattrapage) - toutes les 30 min
+    from app.jobs_scraping import run_vinted_batch
     scheduler.schedule(
-        scheduled_time=datetime.now(timezone.utc) + timedelta(minutes=2),
-        func=rescore_deals_batch,
-        args=[50, False],
-        interval=900,
+        scheduled_time=datetime.now(timezone.utc) + timedelta(minutes=7),
+        func=run_vinted_batch,
+        interval=1800,  # 30 minutes
         repeat=None,
         result_ttl=3600,
         queue_name="default",
     )
-    logger.info("Scheduled: rescore deals every 15 min")
+    logger.info("Scheduled: Vinted batch (catch-up) every 30 min")
     
-    # 4. Nettoyage logs - 24h
+    # 4. Batch scoring supplémentaire (rattrapage) - toutes les 20 min
+    from app.jobs_scraping import run_scoring_batch
+    scheduler.schedule(
+        scheduled_time=datetime.now(timezone.utc) + timedelta(minutes=12),
+        func=run_scoring_batch,
+        interval=1200,  # 20 minutes
+        repeat=None,
+        result_ttl=3600,
+        queue_name="default",
+    )
+    logger.info("Scheduled: scoring batch (catch-up) every 20 min")
+    
+    # 5. Nettoyage logs - 24h
     from app.services.scraping_service import delete_old_scraping_logs
     scheduler.schedule(
         scheduled_time=datetime.now(timezone.utc) + timedelta(hours=1),
@@ -71,7 +88,7 @@ def setup_scheduled_jobs():
     )
     logger.info("Scheduled: cleanup logs every 24h")
     
-    logger.info("All scheduled jobs configured")
+    logger.info("All scheduled jobs configured (batch mode)")
     return scheduler
 
 
