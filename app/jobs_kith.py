@@ -1,6 +1,5 @@
 """
-Scraper KITH EU - Mode batch (sans scoring temps réel).
-Les deals sont stockés EN ATTENTE et scorés par le batch job.
+Scraper KITH EU - Avec scoring autonome immédiat.
 """
 
 import httpx
@@ -10,7 +9,10 @@ from typing import Dict, Any, List, Optional
 from loguru import logger
 
 from app.normalizers.item import DealItem
-from app.services.deal_service import persist_deal
+from app.services.autonomous_scoring_service import score_deal_autonomous
+from app.db.session import SessionLocal
+from app.models.deal_score import DealScore
+from app.repositories.deal_repository import DealRepository
 
 
 KITH_BASE_URL = "https://eu.kith.com"
@@ -20,6 +22,7 @@ KITH_COLLECTIONS = [
     "kids-footwear-sale",
     "kids-apparel-sale",
 ]
+MIN_SCORE = 60
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -27,8 +30,38 @@ HEADERS = {
 }
 
 
-def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250) -> Dict[str, Any]:
-    """Scrape une collection KITH EU (mode batch - sans scoring)."""
+def persist_kith_deal_with_score(item: DealItem, score_data: Dict, session) -> Dict:
+    """Persiste un deal KITH avec son score."""
+    repo = DealRepository(session)
+    existing = repo.get_by_source_and_id(item.source, item.external_id)
+    was_existing = existing is not None
+    
+    deal = repo.upsert(item)
+    deal_id = deal.id
+    
+    existing_score = session.query(DealScore).filter(DealScore.deal_id == deal_id).first()
+    if not existing_score:
+        deal_score = DealScore(
+            deal_id=deal_id,
+            flip_score=score_data.get('flip_score', 0),
+            margin_score=score_data.get('discount_score'),
+            liquidity_score=score_data.get('brand_score'),
+            popularity_score=score_data.get('model_score'),
+            recommended_action=score_data.get('recommended_action'),
+            confidence=score_data.get('confidence'),
+            explanation=score_data.get('explanation'),
+            explanation_short=score_data.get('explanation_short'),
+            risks=score_data.get('risks', []),
+            score_breakdown=score_data.get('score_breakdown', {}),
+            model_version='autonomous_v1',
+        )
+        session.add(deal_score)
+    
+    return {"id": deal_id, "action": "updated" if was_existing else "created"}
+
+
+def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250, min_score: int = MIN_SCORE) -> Dict[str, Any]:
+    """Scrape une collection KITH avec scoring autonome."""
     url = f"{KITH_BASE_URL}/collections/{collection}/products.json"
     
     all_products = []
@@ -52,27 +85,47 @@ def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250)
                     break
                 
                 all_products.extend(products)
-                logger.info(f"KITH {collection} page {page}: {len(products)} produits")
+                logger.info(f"KITH {collection} page {page}: {len(products)} products")
                 
                 if len(products) < 250:
                     break
-                    
                 page += 1
         
-        # Stocker les deals (sans scoring - sera fait par le batch)
         deals_saved = 0
         deals_skipped = 0
         
-        for product in all_products:
-            deal_item = parse_kith_product(product, collection)
-            if not deal_item:
-                deals_skipped += 1
-                continue
-            
-            result = persist_deal(deal_item)
-            if result.get("action") == "created":
+        session = SessionLocal()
+        
+        try:
+            for product in all_products:
+                deal_item = parse_kith_product(product, collection)
+                if not deal_item:
+                    continue
+                
+                # Score autonome
+                deal_data = {
+                    "title": deal_item.title,
+                    "brand": deal_item.brand,
+                    "model": deal_item.model,
+                    "category": deal_item.category,
+                    "discount_percent": deal_item.discount_percent,
+                    "price": deal_item.price,
+                    "sizes_available": deal_item.sizes_available,
+                }
+                score_result = score_deal_autonomous(deal_data)
+                flip_score = score_result.get('flip_score', 0)
+                
+                if flip_score < min_score:
+                    deals_skipped += 1
+                    continue
+                
+                persist_kith_deal_with_score(deal_item, score_result, session)
+                session.commit()
                 deals_saved += 1
-                logger.debug(f"KITH deal saved (pending scoring): {deal_item.title[:40]}")
+                logger.info(f"KITH: {deal_item.title[:35]} | Score: {flip_score:.1f}")
+                
+        finally:
+            session.close()
         
         return {
             "status": "success",
@@ -81,7 +134,6 @@ def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250)
             "products_found": len(all_products),
             "deals_saved": deals_saved,
             "deals_skipped": deals_skipped,
-            "pending_scoring": deals_saved,  # Ces deals attendent le batch
         }
         
     except Exception as e:
@@ -90,7 +142,7 @@ def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250)
 
 
 def parse_kith_product(product: Dict, collection: str) -> Optional[DealItem]:
-    """Parse un produit KITH en format DealItem."""
+    """Parse produit KITH."""
     try:
         product_id = str(product.get("id", ""))
         title = product.get("title", "")
@@ -111,7 +163,7 @@ def parse_kith_product(product: Dict, collection: str) -> Optional[DealItem]:
         if not original_price or original_price <= price:
             return None
         
-        discount_pct = round((1 - price / original_price) * 100, 1) if original_price else 0
+        discount_pct = round((1 - price / original_price) * 100, 1)
         
         sizes = []
         for v in available_variants:
@@ -126,11 +178,11 @@ def parse_kith_product(product: Dict, collection: str) -> Optional[DealItem]:
         tags_lower = [t.lower() for t in tags]
         
         gender = "unisex"
-        if "kids" in collection or any("kids" in t or "enfant" in t for t in tags_lower):
+        if "kids" in collection:
             gender = "kids"
-        elif any("mens" in t or "men" == t for t in tags_lower):
+        elif any("mens" in t for t in tags_lower):
             gender = "men"
-        elif any("womens" in t or "women" == t for t in tags_lower):
+        elif any("womens" in t for t in tags_lower):
             gender = "women"
         
         category = "footwear" if "footwear" in collection else "apparel"
@@ -151,7 +203,6 @@ def parse_kith_product(product: Dict, collection: str) -> Optional[DealItem]:
             image_url=image_url,
             sizes_available=sizes if sizes else None,
             seller_name="KITH EU",
-            raw={"tags": tags[:10], "product_type": product.get("product_type")},
         )
         
     except Exception as e:
@@ -159,15 +210,15 @@ def parse_kith_product(product: Dict, collection: str) -> Optional[DealItem]:
         return None
 
 
-def collect_all_kith() -> Dict[str, Any]:
-    """Scrape toutes les collections KITH (mode batch)."""
-    results = {"collections": {}, "total_deals": 0, "total_pending": 0}
+def collect_all_kith(min_score: int = MIN_SCORE) -> Dict[str, Any]:
+    """Scrape toutes les collections KITH."""
+    results = {"collections": {}, "total_saved": 0, "total_skipped": 0}
     
     for collection in KITH_COLLECTIONS:
-        result = collect_kith_collection(collection)
+        result = collect_kith_collection(collection, min_score=min_score)
         results["collections"][collection] = result
-        results["total_deals"] += result.get("deals_saved", 0)
-        results["total_pending"] += result.get("pending_scoring", 0)
+        results["total_saved"] += result.get("deals_saved", 0)
+        results["total_skipped"] += result.get("deals_skipped", 0)
     
-    logger.info(f"KITH total: {results['total_deals']} deals saved (pending scoring)")
+    logger.info(f"KITH total: {results['total_saved']} saved, {results['total_skipped']} skipped")
     return results

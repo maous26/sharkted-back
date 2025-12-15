@@ -1,11 +1,11 @@
 """
-Jobs de scraping - Collecte sans scoring temps réel.
+Jobs de scraping - Collecte avec scoring AUTONOME (sans Vinted).
 
-Nouveau flow (batch):
-1. Collecter les deals et les stocker EN ATTENTE (pas affichés)
-2. Job batch Vinted toutes les 15 min pour alimenter le cache
-3. Job batch scoring pour scorer les deals en attente
-4. Les deals avec score >= 60 deviennent visibles
+Flow:
+1. Collecter les deals
+2. Scorer immédiatement avec le scoring autonome (marque, modèle, discount)
+3. Persister uniquement si score >= 60
+4. Les deals sont visibles immédiatement avec leur score
 """
 import time
 from datetime import datetime
@@ -24,11 +24,17 @@ from app.services.scraping_service import (
     ScrapingResult,
     get_enabled_sources,
 )
-from app.services.deal_service import persist_deal
+from app.services.deal_service import get_db_session
+from app.services.autonomous_scoring_service import score_deal_autonomous
 from app.collectors.sources.courir import fetch_courir_product
 from app.collectors.sources.footlocker import fetch_footlocker_product
 from app.collectors.sources.size import fetch_size_product
 from app.collectors.sources.jdsports import fetch_jdsports_product
+
+# Models
+from app.models.deal import Deal
+from app.models.deal_score import DealScore
+from app.repositories.deal_repository import DealRepository
 
 logger = get_logger(__name__)
 
@@ -41,105 +47,163 @@ COLLECTORS = {
 }
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+MIN_SCORE = 60
 
 
-def scrape_source(source: str, max_products: int = 50) -> Dict:
-    """
-    Job: scrape une source et stocke les deals EN ATTENTE.
+def persist_deal_with_autonomous_score(item, score_data: Dict, session) -> Dict:
+    """Persiste un deal avec son score autonome."""
+    repo = DealRepository(session)
+    existing = repo.get_by_source_and_id(item.source, item.external_id)
+    was_existing = existing is not None
     
-    Les deals seront scorés par le batch job suivant.
-    Ils ne seront visibles qu'une fois scorés avec score >= 60.
+    deal = repo.upsert(item)
+    deal_id = deal.id
+    
+    # Sauvegarder le score
+    existing_score = session.query(DealScore).filter(DealScore.deal_id == deal_id).first()
+    if existing_score:
+        # Update
+        for key, value in score_data.items():
+            if hasattr(existing_score, key) and key not in ['score_breakdown']:
+                setattr(existing_score, key, value)
+        existing_score.score_breakdown = score_data.get('score_breakdown', {})
+        existing_score.updated_at = datetime.utcnow()
+    else:
+        # Create
+        deal_score = DealScore(
+            deal_id=deal_id,
+            flip_score=score_data.get('flip_score', 0),
+            margin_score=score_data.get('discount_score'),  # Use discount as proxy
+            liquidity_score=score_data.get('brand_score'),  # Use brand as proxy
+            popularity_score=score_data.get('model_score'),
+            recommended_action=score_data.get('recommended_action'),
+            recommended_price=None,  # No Vinted data
+            confidence=score_data.get('confidence'),
+            explanation=score_data.get('explanation'),
+            explanation_short=score_data.get('explanation_short'),
+            risks=score_data.get('risks', []),
+            score_breakdown=score_data.get('score_breakdown', {}),
+            model_version=score_data.get('model_version', 'autonomous_v1'),
+        )
+        session.add(deal_score)
+    
+    return {
+        "id": deal_id,
+        "action": "updated" if was_existing else "created",
+        "flip_score": score_data.get('flip_score', 0),
+    }
+
+
+def scrape_source(source: str, max_products: int = 50, min_score: int = MIN_SCORE) -> Dict:
+    """
+    Scrape une source avec scoring AUTONOME immédiat.
     """
     trace_id = set_trace_id()
     start_time = time.perf_counter()
     
-    logger.info(f"Starting source scraping (batch mode)", source=source, max_products=max_products)
+    logger.info(f"Starting scraping with autonomous scoring", source=source, max_products=max_products)
     
     if source not in COLLECTORS:
-        return {
-            "source": source,
-            "status": "error",
-            "error": f"No collector for source: {source}",
-        }
+        return {"source": source, "status": "error", "error": f"No collector for: {source}"}
     
-    # Phase 1: Découverte des produits
     result, product_urls = discover_products(source)
     
     if result.status in ("error", "skipped"):
         add_scraping_log(result)
         return result.to_dict()
     
-    # Phase 2: Collecte (sans scoring - sera fait en batch)
     collector = COLLECTORS[source]
     urls_to_process = list(product_urls)[:max_products]
     
     collected = 0
     new_deals = 0
     updated_deals = 0
+    skipped_low_score = 0
     errors = []
     
-    for url in urls_to_process:
-        try:
-            # Collecter le produit
-            item = collector(url)
-            
-            # Persister en base (sans score pour l'instant)
-            persist_result = persist_deal(item)
-            
-            collected += 1
-            if persist_result.get("action") == "created":
-                new_deals += 1
-            else:
-                updated_deals += 1
-            
-            logger.debug(f"Product collected", source=source, url=url)
-            
-            # Pause entre les produits
-            random_delay(source)
-            
-        except Exception as e:
-            errors.append(f"{url}: {str(e)[:100]}")
-            logger.warning(f"Failed to collect product", source=source, url=url, error=str(e))
-            continue
+    from app.db.session import SessionLocal
+    session = SessionLocal()
     
-    # Mettre à jour le résultat
+    try:
+        for url in urls_to_process:
+            try:
+                # 1. Collecter
+                item = collector(url)
+                collected += 1
+                
+                # 2. Scorer avec le scoring autonome
+                deal_data = {
+                    "title": item.title,
+                    "brand": item.brand or item.seller_name,
+                    "model": item.model,
+                    "category": item.category,
+                    "discount_percent": item.discount_percent,
+                    "price": item.price,
+                    "sizes_available": item.sizes_available,
+                }
+                score_result = score_deal_autonomous(deal_data)
+                flip_score = score_result.get('flip_score', 0)
+                
+                # 3. Filtrer
+                if flip_score < min_score:
+                    skipped_low_score += 1
+                    logger.debug(f"Skipped (score {flip_score:.1f})", title=item.title[:30])
+                    continue
+                
+                # 4. Persister avec score
+                persist_result = persist_deal_with_autonomous_score(item, score_result, session)
+                session.commit()
+                
+                if persist_result.get("action") == "created":
+                    new_deals += 1
+                    logger.info(f"NEW: {item.title[:40]} | Score: {flip_score:.1f}", source=source)
+                else:
+                    updated_deals += 1
+                
+                random_delay(source)
+                
+            except Exception as e:
+                session.rollback()
+                errors.append(f"{url}: {str(e)[:80]}")
+                logger.warning(f"Error: {e}", url=url[:50])
+                continue
+    finally:
+        session.close()
+    
     result.products_found = len(product_urls)
     result.products_new = new_deals
     result.products_updated = updated_deals
     result.errors.extend(errors[:10])
     result.completed_at = datetime.utcnow()
-    result.duration_seconds = (time.perf_counter() - start_time)
-    
-    if collected > 0:
-        result.status = "success" if not errors else "partial"
-    else:
-        result.status = "error"
+    result.duration_seconds = time.perf_counter() - start_time
+    result.status = "success" if (new_deals + updated_deals) > 0 else ("partial" if errors else "completed")
     
     add_scraping_log(result)
     
     logger.info(
-        f"Source scraping completed (pending scoring)",
+        f"Scraping done",
         source=source,
-        products_found=result.products_found,
-        collected=collected,
+        found=result.products_found,
         new=new_deals,
         updated=updated_deals,
-        errors=len(errors),
-        duration_sec=round(result.duration_seconds, 2),
+        skipped=skipped_low_score,
+        duration=round(result.duration_seconds, 1),
     )
     
     return {
         **result.to_dict(),
         "collected": collected,
-        "pending_scoring": new_deals,  # Ces deals attendent le batch scoring
+        "skipped_low_score": skipped_low_score,
+        "min_score": min_score,
     }
 
 
 def scrape_all_sources(
     sources: Optional[List[str]] = None,
     max_products_per_source: int = 30,
+    min_score: int = MIN_SCORE,
 ) -> Dict:
-    """Job: scrape toutes les sources (mode batch)."""
+    """Scrape toutes les sources avec scoring autonome."""
     trace_id = set_trace_id()
     start_time = time.perf_counter()
     
@@ -148,95 +212,37 @@ def scrape_all_sources(
     else:
         sources_to_scrape = get_enabled_sources()
     
-    logger.info(f"Starting multi-source scraping (batch mode)", sources=sources_to_scrape)
+    logger.info(f"Multi-source scraping", sources=sources_to_scrape)
     
     results = []
-    total_found = 0
     total_new = 0
-    total_updated = 0
+    total_skipped = 0
     
     for source in sources_to_scrape:
         try:
-            result = scrape_source(source, max_products=max_products_per_source)
+            result = scrape_source(source, max_products=max_products_per_source, min_score=min_score)
             results.append(result)
-            total_found += result.get("deals_found", 0)
             total_new += result.get("deals_new", 0)
-            total_updated += result.get("deals_updated", 0)
+            total_skipped += result.get("skipped_low_score", 0)
         except Exception as e:
-            logger.error(f"Failed to scrape source", source=source, error=str(e))
-            results.append({
-                "source": source,
-                "status": "error",
-                "error": str(e),
-            })
+            logger.error(f"Source failed: {source}", error=str(e))
+            results.append({"source": source, "status": "error", "error": str(e)})
         
         random_delay(source, multiplier=1.5)
-    
-    duration = time.perf_counter() - start_time
     
     return {
         "status": "completed",
         "sources_scraped": len(results),
-        "total_found": total_found,
         "total_new": total_new,
-        "total_updated": total_updated,
-        "pending_vinted_batch": total_new,  # Ces deals attendent le batch Vinted
-        "duration_seconds": round(duration, 2),
+        "total_skipped": total_skipped,
+        "duration_seconds": round(time.perf_counter() - start_time, 2),
         "results": results,
     }
 
 
-def run_vinted_batch():
-    """
-    Job batch: scrape Vinted pour les deals sans stats.
-    Exécuté toutes les 15 minutes.
-    """
-    from app.services.vinted_cache_service import batch_scrape_pending_deals
-    
-    logger.info("Starting Vinted batch scraping")
-    result = batch_scrape_pending_deals(limit=50)
-    logger.info(f"Vinted batch completed: {result}")
-    return result
-
-
-def run_scoring_batch():
-    """
-    Job batch: score les deals qui ont des stats Vinted.
-    Supprime les deals avec score < 60.
-    """
-    from app.services.vinted_cache_service import batch_rescore_deals
-    
-    logger.info("Starting scoring batch")
-    result = batch_rescore_deals(limit=50)
-    logger.info(f"Scoring batch completed: {result}")
-    return result
-
-
 def scheduled_scraping():
-    """
-    Job planifié complet (toutes les 15 min):
-    1. Scraper les sources
-    2. Batch Vinted
-    3. Batch scoring
-    """
-    logger.info("=== Scheduled scraping cycle START ===")
-    
-    # 1. Scraper les sources
-    scrape_result = scrape_all_sources(max_products_per_source=30)
-    logger.info(f"Scraping done: {scrape_result.get('total_new', 0)} new deals")
-    
-    # 2. Batch Vinted (scrape les stats pour les deals en attente)
-    vinted_result = run_vinted_batch()
-    logger.info(f"Vinted batch done: {vinted_result.get('stats_saved', 0)} stats")
-    
-    # 3. Batch scoring (score et filtre les deals)
-    scoring_result = run_scoring_batch()
-    logger.info(f"Scoring done: {scoring_result.get('deals_scored', 0)} scored, {scoring_result.get('deals_deleted', 0)} deleted")
-    
-    logger.info("=== Scheduled scraping cycle END ===")
-    
-    return {
-        "scraping": scrape_result,
-        "vinted_batch": vinted_result,
-        "scoring_batch": scoring_result,
-    }
+    """Job planifié."""
+    logger.info("=== Scheduled scraping START ===")
+    result = scrape_all_sources(max_products_per_source=30)
+    logger.info(f"=== Scheduled scraping END: {result.get('total_new', 0)} new deals ===")
+    return result
