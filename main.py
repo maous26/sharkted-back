@@ -29,6 +29,7 @@ from app.routers.proxies import router as proxies_router
 from app.routers.drops import router as drops_router
 from app.routers.favorites import router as favorites_router
 from app.routers.outcomes import router as outcomes_router
+from app.routers.images import router as images_router
 from app.core.config import JWT_SECRET, JWT_ALGO
 from app.services.deal_service import (
     get_deal,
@@ -238,6 +239,7 @@ app.include_router(proxies_router)      # /v1/proxies/*
 app.include_router(drops_router)      # /v1/drops/*
 app.include_router(favorites_router)  # /v1/favorites/*
 app.include_router(outcomes_router)  # /v1/outcomes/*
+app.include_router(images_router)  # /v1/images/*
 
 def get_user_from_creds(creds):
     """

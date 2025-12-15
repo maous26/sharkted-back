@@ -148,13 +148,20 @@ def configure_proxies(config: Dict[str, Any]) -> None:
     )
 
 
+
 def get_proxy(level: str, session_id: Optional[str] = None) -> Optional[Dict[str, str]]:
-    return _proxy_pool.get_proxy(level, session_id)
+    """Obtient un proxy depuis la DB via proxy_service."""
+    from app.services.proxy_service import get_proxy_for_scraping
+    # Map level to proxy_type
+    proxy_type = "web_unlocker" if level == "residential" else level
+    return get_proxy_for_scraping(proxy_type)
 
 
 def has_residential_proxies() -> bool:
-    """Vérifie si des proxies résidentiels sont disponibles."""
-    return _proxy_pool.has_residential()
+    """Vérifie si des proxies Web Unlocker/résidentiels sont configurés."""
+    from app.services.proxy_service import has_web_unlocker_configured, has_residential_configured
+    return has_web_unlocker_configured() or has_residential_configured()
+
 
 
 # =============================================================================
@@ -812,3 +819,154 @@ def get_orchestrator() -> ScrapingOrchestrator:
     if _orchestrator is None:
         _orchestrator = ScrapingOrchestrator()
     return _orchestrator
+
+
+# =============================================================================
+# PREMIUM FALLBACK - Intégration avec Premium Gate
+# =============================================================================
+
+def fetch_with_premium_fallback(
+    url: str,
+    target: str,
+    product_id: str = None,
+    product_name: str = None,
+    product_score: float = 0,
+    has_premium_alert: bool = False,
+    timeout: int = 30,
+) -> Tuple[Optional[str], ErrorType, Dict]:
+    """
+    Fetch une URL avec fallback intelligent vers Web Unlocker.
+    
+    Pipeline:
+    1. Essai avec scraping cheap (direct ou datacenter)
+    2. Si échec (403/429) ET conditions Premium remplies → Web Unlocker
+    3. Sinon → mark_as_unavailable
+    
+    Args:
+        url: URL à scraper
+        target: Slug du site (nike, adidas, etc.)
+        product_id: ID du produit (pour tracking)
+        product_name: Nom du produit (pour tracking)
+        product_score: Score du produit (0-100)
+        has_premium_alert: Alerte Premium existe pour ce produit
+        timeout: Timeout en secondes
+    
+    Returns:
+        (content, error_type, metadata)
+    """
+    from app.services.premium_gate import (
+        authorize_web_unlocker_request,
+        TriggerType,
+        premium_gate,
+    )
+    
+    orchestrator = get_orchestrator()
+    
+    # Étape 1: Essai cheap
+    content, error_type, metadata = orchestrator.fetch(url, target, timeout)
+    
+    # Si succès, retourner directement
+    if error_type == ErrorType.SUCCESS and content:
+        metadata["source"] = "cheap"
+        return content, error_type, metadata
+    
+    # Étape 2: Vérifier si fallback Web Unlocker est autorisé
+    cheap_failed = error_type in [ErrorType.HTTP_403, ErrorType.HTTP_429, ErrorType.BLOCKED, ErrorType.CAPTCHA]
+    
+    if not cheap_failed:
+        # Erreur non récupérable (timeout, network, etc.)
+        metadata["fallback_attempted"] = False
+        metadata["fallback_reason"] = "error_not_recoverable"
+        return content, error_type, metadata
+    
+    # Déterminer le trigger
+    if has_premium_alert:
+        trigger = TriggerType.PREMIUM_ALERT
+    elif product_score >= 70:
+        trigger = TriggerType.HIGH_SCORE
+    else:
+        trigger = TriggerType.CHEAP_FAILED
+    
+    # Demander autorisation
+    authorized, trace = authorize_web_unlocker_request(
+        url=url,
+        site=target,
+        product_id=product_id,
+        product_name=product_name,
+        product_score=product_score,
+        trigger=trigger,
+    )
+    
+    if not authorized:
+        metadata["fallback_attempted"] = False
+        metadata["fallback_reason"] = "not_authorized_premium"
+        logger.info(f"Web Unlocker not authorized for {url} (score={product_score}, alert={has_premium_alert})")
+        return None, error_type, metadata
+    
+    # Étape 3: Exécuter Web Unlocker
+    logger.info(f"Executing Web Unlocker fallback for {url}")
+    
+    import time
+    start_time = time.perf_counter()
+    
+    try:
+        # Utiliser le proxy résidentiel/Web Unlocker
+        proxy = get_proxy("residential")
+        
+        if not proxy:
+            metadata["fallback_attempted"] = True
+            metadata["fallback_reason"] = "no_residential_proxy_configured"
+            if trace:
+                premium_gate.record_result(trace.request_id, success=False, response_time_ms=0)
+            return None, ErrorType.BLOCKED, metadata
+        
+        import cloudscraper
+        scraper = cloudscraper.create_scraper()
+        
+        resp = scraper.get(url, proxies=proxy, timeout=timeout)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        
+        if resp.status_code == 200:
+            if trace:
+                premium_gate.record_result(trace.request_id, success=True, response_time_ms=duration_ms)
+            
+            metadata["fallback_attempted"] = True
+            metadata["fallback_success"] = True
+            metadata["source"] = "web_unlocker"
+            metadata["web_unlocker_cost"] = trace.cost_estimate if trace else 0.002
+            metadata["served_users"] = len(trace.served_users) if trace else 0
+            
+            return resp.text, ErrorType.SUCCESS, metadata
+        else:
+            if trace:
+                premium_gate.record_result(trace.request_id, success=False, response_time_ms=duration_ms)
+            
+            metadata["fallback_attempted"] = True
+            metadata["fallback_success"] = False
+            metadata["fallback_status_code"] = resp.status_code
+            
+            return None, ErrorType.BLOCKED, metadata
+            
+    except Exception as e:
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        if trace:
+            premium_gate.record_result(trace.request_id, success=False, response_time_ms=duration_ms)
+        
+        logger.error(f"Web Unlocker error for {url}: {e}")
+        metadata["fallback_attempted"] = True
+        metadata["fallback_success"] = False
+        metadata["fallback_error"] = str(e)
+        
+        return None, ErrorType.NETWORK, metadata
+
+
+def get_premium_scraping_stats() -> Dict:
+    """Retourne les stats combinées scraping + Premium Gate."""
+    from app.services.premium_gate import get_web_unlocker_stats
+    
+    orchestrator = get_orchestrator()
+    
+    return {
+        "scraping": orchestrator.get_stats(),
+        "web_unlocker": get_web_unlocker_stats(),
+    }

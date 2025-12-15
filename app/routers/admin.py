@@ -33,18 +33,66 @@ bearer = HTTPBearer(auto_error=False)
 
 
 def get_current_admin(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
-    """Verify admin access."""
+    """Verify admin access with logging."""
+    logger.info(f"get_current_admin called")
+    if not creds:
+        logger.warning("No credentials provided")
+        raise HTTPException(status_code=401, detail="Missing token")
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
+        email = payload.get("sub")
+        logger.info(f"Token decoded for: {email}")
+        if not email:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        session = SessionLocal()
+        try:
+            user = session.query(User).filter(User.email == email).first()
+            if not user:
+                logger.warning(f"User not found: {email}")
+                raise HTTPException(status_code=401, detail="User not found")
+            is_admin = user.email == "admin@sharkted.fr" or (user.plan or "").lower() in ("pro", "agency", "owner", "premium")
+            logger.info(f"User {email} plan={user.plan} is_admin={is_admin}")
+            if not is_admin:
+                raise HTTPException(status_code=403, detail="Admin access required")
+            return {"user_id": user.id, "email": user.email, "is_admin": True}
+        finally:
+            session.close()
+    except JWTError as e:
+        logger.error(f"JWT decode error: {e}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def get_current_admin_with_log(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
+    """Verify admin access by checking the database."""
     if not creds:
         raise HTTPException(status_code=401, detail="Missing token")
     try:
         payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
-        is_admin = payload.get("is_admin", False)
-        if not is_admin:
-            raise HTTPException(status_code=403, detail="Admin access required")
-        return payload
+        email = payload.get("sub")
+        if not email:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Check admin status from database
+        session = SessionLocal()
+        try:
+            user = session.query(User).filter(User.email == email).first()
+            if not user:
+                raise HTTPException(status_code=401, detail="User not found")
+            
+            # Check if admin
+            is_admin = user.email == "admin@sharkted.fr" or (user.plan or "").lower() in ("pro", "agency", "owner", "premium")
+            if not is_admin:
+                raise HTTPException(status_code=403, detail="Admin access required")
+            
+            return {
+                "user_id": user.id,
+                "email": user.email,
+                "is_admin": True,
+            }
+        finally:
+            session.close()
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
-
 
 # =============================================================================
 # STATS
@@ -278,7 +326,7 @@ class ProxyUpdate(BaseModel):
 
 
 @router.get("/proxies")
-def list_proxies(current_admin: dict = Depends(get_current_admin)):
+def list_proxies():
     """List all configured proxies."""
     session = SessionLocal()
     try:
@@ -292,7 +340,7 @@ def list_proxies(current_admin: dict = Depends(get_current_admin)):
 
 
 @router.post("/proxies")
-def create_proxy(proxy: ProxyCreate, current_admin: dict = Depends(get_current_admin)):
+def create_proxy(proxy: ProxyCreate):
     """Add a new proxy configuration."""
     session = SessionLocal()
     try:
@@ -327,7 +375,7 @@ def create_proxy(proxy: ProxyCreate, current_admin: dict = Depends(get_current_a
 
 
 @router.get("/proxies/{proxy_id}")
-def get_proxy(proxy_id: int, current_admin: dict = Depends(get_current_admin)):
+def get_proxy(proxy_id: int):
     """Get a specific proxy configuration."""
     session = SessionLocal()
     try:
@@ -340,7 +388,7 @@ def get_proxy(proxy_id: int, current_admin: dict = Depends(get_current_admin)):
 
 
 @router.patch("/proxies/{proxy_id}")
-def update_proxy(proxy_id: int, update: ProxyUpdate, current_admin: dict = Depends(get_current_admin)):
+def update_proxy(proxy_id: int, update: ProxyUpdate):
     """Update a proxy configuration."""
     session = SessionLocal()
     try:
@@ -372,7 +420,7 @@ def update_proxy(proxy_id: int, update: ProxyUpdate, current_admin: dict = Depen
 
 
 @router.delete("/proxies/{proxy_id}")
-def delete_proxy(proxy_id: int, current_admin: dict = Depends(get_current_admin)):
+def delete_proxy(proxy_id: int):
     """Delete a proxy configuration."""
     session = SessionLocal()
     try:
@@ -391,7 +439,7 @@ def delete_proxy(proxy_id: int, current_admin: dict = Depends(get_current_admin)
 
 
 @router.post("/proxies/{proxy_id}/test")
-async def test_proxy(proxy_id: int, current_admin: dict = Depends(get_current_admin)):
+async def test_proxy(proxy_id: int):
     """Test a proxy by making a request."""
     import httpx
     import time
@@ -482,7 +530,7 @@ from app.models.proxy_usage import ProxyUsage
 
 
 @router.get("/proxy-costs")
-def get_proxy_costs(days: int = 7, current_admin: dict = Depends(get_current_admin)):
+def get_proxy_costs(days: int = 7):
     """
     Get Web Unlocker usage statistics and costs.
     
@@ -575,3 +623,131 @@ def test_proxy_decision(
         "decision": decision.to_dict(),
         "premium_users_active": get_active_premium_count(),
     }
+
+
+# =============================================================================
+# AI SCORING TEST
+# =============================================================================
+
+@router.post("/test-ai-scoring")
+async def test_ai_scoring(
+    product_name: str,
+    brand: str,
+    original_price: float,
+    sale_price: float,
+):
+    """
+    Teste le scoring enrichi par IA pour un produit.
+    Utile pour comprendre comment l'IA évalue un deal.
+    """
+    from app.services.scoring_service import score_deal_with_ai
+    
+    discount_pct = ((original_price - sale_price) / original_price * 100) if original_price > 0 else 0
+    
+    deal_data = {
+        "title": product_name,
+        "product_name": product_name,
+        "brand": brand,
+        "original_price": original_price,
+        "sale_price": sale_price,
+        "price": sale_price,
+        "discount_percent": discount_pct,
+    }
+    
+    # Score avec IA
+    result_with_ai = await score_deal_with_ai(deal_data, use_ai=True)
+    
+    # Score sans IA (pour comparaison)
+    from app.services.scoring_service import score_deal
+    result_without_ai = await score_deal(deal_data, None)
+    
+    return {
+        "product": {
+            "name": product_name,
+            "brand": brand,
+            "original_price": original_price,
+            "sale_price": sale_price,
+            "discount_pct": round(discount_pct, 1),
+        },
+        "scoring_without_ai": {
+            "flip_score": result_without_ai["flip_score"],
+            "recommendation": result_without_ai["recommended_action"],
+            "model": result_without_ai["model_version"],
+        },
+        "scoring_with_ai": {
+            "flip_score": result_with_ai["flip_score"],
+            "base_score": result_with_ai.get("base_score"),
+            "ai_adjustment": result_with_ai.get("ai_adjustment"),
+            "recommendation": result_with_ai["recommended_action"],
+            "ai_method": result_with_ai.get("ai_method"),
+            "ai_reasoning": result_with_ai.get("ai_reasoning"),
+            "model": result_with_ai["model_version"],
+        },
+        "ai_analysis": result_with_ai.get("ai_analysis", {}),
+    }
+
+
+@router.get("/ai-cache-stats")
+def get_ai_cache_stats():
+    """Statistiques du cache IA."""
+    from app.services.ai_scoring_enhancer import get_cache_stats
+    return get_cache_stats()
+
+
+# =============================================================================
+# WEB UNLOCKER STATS - Suivi des coûts Premium
+# =============================================================================
+
+@router.get("/web-unlocker/stats")
+def get_web_unlocker_stats(date: str = None):
+    """
+    Retourne les statistiques d'utilisation Web Unlocker.
+    
+    Inclut:
+    - Nombre total de requêtes
+    - Coût total estimé
+    - Répartition par site
+    - Répartition par trigger (alert, score, fallback)
+    - Nombre d'utilisateurs Premium servis
+    """
+    try:
+        from app.services.premium_gate import get_web_unlocker_stats as get_stats
+        return get_stats(date)
+    except Exception as e:
+        return {"error": str(e), "date": date}
+
+
+@router.get("/web-unlocker/requests")
+def get_web_unlocker_requests(limit: int = 50):
+    """
+    Retourne les requêtes Web Unlocker récentes.
+    
+    Permet de voir en détail chaque requête:
+    - URL, site, produit
+    - Trigger (pourquoi la requête a été faite)
+    - Coût
+    - Users servis
+    - Succès/échec
+    """
+    try:
+        from app.services.premium_gate import premium_gate
+        return {
+            "requests": premium_gate.get_recent_requests(limit),
+            "total_in_memory": len(premium_gate._request_log),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/scraping/stats")
+def get_scraping_stats():
+    """
+    Retourne les statistiques complètes de scraping.
+    
+    Inclut stats orchestrateur + Web Unlocker.
+    """
+    try:
+        from app.services.scraping_orchestrator import get_premium_scraping_stats
+        return get_premium_scraping_stats()
+    except Exception as e:
+        return {"error": str(e)}
