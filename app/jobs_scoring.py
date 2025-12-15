@@ -379,3 +379,102 @@ def score_deals_after_scraping(deal_ids: List[int]) -> Dict:
         return {"status": "error", "error": str(e)}
     finally:
         session.close()
+
+
+
+
+def rescore_deals_batch(limit: int = 50, force: bool = False) -> Dict:
+    """Rescore des deals en batch avec les stats Vinted."""
+    import asyncio
+    from app.db.session import SessionLocal
+    from app.models.deal import Deal
+    from app.models.vinted_stats import VintedStats
+    from app.models.deal_score import DealScore
+    from app.services.vinted_service import get_vinted_stats_for_deal
+    from app.services.scoring_service import score_deal
+    from datetime import datetime
+    
+    db = SessionLocal()
+    results = {"processed": 0, "scored": 0, "errors": 0, "no_data": 0}
+    
+    try:
+        query = db.query(Deal)
+        if not force:
+            query = query.outerjoin(VintedStats).filter(VintedStats.id == None)
+        
+        deals = query.order_by(Deal.id.desc()).limit(limit).all()
+        logger.info(f"Rescraping Vinted stats for {len(deals)} deals")
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        for deal in deals:
+            results["processed"] += 1
+            try:
+                logger.info(f"Processing deal {deal.id}: {deal.title[:50]}...")
+                stats = loop.run_until_complete(get_vinted_stats_for_deal(deal.title, deal.brand, deal.price))
+                
+                if not stats or stats.get("nb_listings", 0) == 0:
+                    results["no_data"] += 1
+                    continue
+                
+                vinted_stat = db.query(VintedStats).filter(VintedStats.deal_id == deal.id).first()
+                if not vinted_stat:
+                    vinted_stat = VintedStats(deal_id=deal.id)
+                    db.add(vinted_stat)
+                
+                vinted_stat.nb_listings = stats.get("nb_listings", 0)
+                vinted_stat.price_min = stats.get("price_min")
+                vinted_stat.price_max = stats.get("price_max")
+                vinted_stat.price_avg = stats.get("price_avg")
+                vinted_stat.price_median = stats.get("price_median")
+                vinted_stat.margin_euro = stats.get("margin_euro")
+                vinted_stat.margin_pct = stats.get("margin_pct")
+                vinted_stat.liquidity_score = stats.get("liquidity_score")
+                vinted_stat.source_type = stats.get("source_type")
+                vinted_stat.coefficient = stats.get("coefficient")
+                vinted_stat.fetched_at = datetime.utcnow()
+                
+                deal_data = {
+                    "brand": deal.brand,
+                    "category": deal.category or "default",
+                    "discount_percent": deal.discount_percent or 0,
+                    "sizes_available": deal.sizes_available,
+                    "color": deal.color
+                }
+                
+                score_result = loop.run_until_complete(score_deal(deal_data, stats))
+                
+                deal_score = db.query(DealScore).filter(DealScore.deal_id == deal.id).first()
+                if not deal_score:
+                    deal_score = DealScore(deal_id=deal.id)
+                    db.add(deal_score)
+                
+                deal_score.flip_score = score_result.get("flip_score", 0)
+                deal_score.recommended_action = score_result.get("recommended_action")
+                deal_score.recommended_price = score_result.get("recommended_price")
+                deal_score.confidence = score_result.get("confidence")
+                deal_score.explanation_short = score_result.get("explanation_short")
+                deal_score.risks = score_result.get("risks", [])
+                deal_score.estimated_sell_days = score_result.get("estimated_sell_days")
+                deal_score.margin_score = score_result.get("score_breakdown", {}).get("margin_score")
+                deal_score.liquidity_score = score_result.get("score_breakdown", {}).get("liquidity_score")
+                deal_score.popularity_score = score_result.get("score_breakdown", {}).get("popularity_score")
+                deal_score.scored_at = datetime.utcnow()
+                deal.score = deal_score.flip_score
+                
+                db.commit()
+                results["scored"] += 1
+                logger.info(f"  -> FlipScore: {deal_score.flip_score}, Margin: {vinted_stat.margin_pct}%")
+                
+            except Exception as e:
+                results["errors"] += 1
+                logger.error(f"Error scoring deal {deal.id}: {e}")
+                db.rollback()
+        
+        loop.close()
+    finally:
+        db.close()
+    
+    logger.info(f"Rescraping complete: scored={results['scored']}, no_data={results['no_data']}, errors={results['errors']}")
+    return results

@@ -22,6 +22,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://sharkted:b70d44323564d812e19f178ab33b69f8@db:5432/sharkted
       - JWT_SECRET=7fd58fc6369dc8b60c6ae8584515fa68f58428ec34067baf4bff4fb2d3b1296e
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
       - db
     working_dir: /app
@@ -58,7 +59,9 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://sharkted:b70d44323564d812e19f178ab33b69f8@db:5432/sharkted
       - JWT_SECRET=7fd58fc6369dc8b60c6ae8584515fa68f58428ec34067baf4bff4fb2d3b1296e
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - REDIS_URL=redis://redis:6379/0
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
       - db
       - redis
@@ -74,7 +77,9 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://sharkted:b70d44323564d812e19f178ab33b69f8@db:5432/sharkted
       - JWT_SECRET=7fd58fc6369dc8b60c6ae8584515fa68f58428ec34067baf4bff4fb2d3b1296e
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - REDIS_URL=redis://redis:6379/0
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
       - db
       - redis
@@ -90,7 +95,9 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://sharkted:b70d44323564d812e19f178ab33b69f8@db:5432/sharkted
       - JWT_SECRET=7fd58fc6369dc8b60c6ae8584515fa68f58428ec34067baf4bff4fb2d3b1296e
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - REDIS_URL=redis://redis:6379/0
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
       - db
       - redis
@@ -107,8 +114,10 @@ services:
       - .:/app
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DATABASE_URL=postgresql+psycopg://sharkted:b70d44323564d812e19f178ab33b69f8@db:5432/sharkted
       - JWT_SECRET=7fd58fc6369dc8b60c6ae8584515fa68f58428ec34067baf4bff4fb2d3b1296e
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
       - redis
     command: ["rqscheduler", "--url", "redis://redis:6379/0", "--interval", "5"]

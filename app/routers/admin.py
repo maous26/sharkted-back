@@ -62,3 +62,98 @@ def get_admin_stats():
         }
     finally:
         session.close()
+
+
+# =============================================================================
+# USER MANAGEMENT ENDPOINTS
+# =============================================================================
+
+from typing import Optional, List
+from pydantic import BaseModel
+from app.models.user import User
+
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    plan: str
+    is_admin: bool
+
+
+class UserPlanUpdate(BaseModel):
+    plan: str  # free, pro, agency, owner
+
+
+@router.get("/users", response_model=List[UserResponse])
+def list_users():
+    """List all users with their plans."""
+    session = SessionLocal()
+    try:
+        users = session.query(User).all()
+        return [
+            UserResponse(
+                id=u.id,
+                email=u.email,
+                plan=u.plan or "free",
+                is_admin=u.is_admin
+            )
+            for u in users
+        ]
+    finally:
+        session.close()
+
+
+@router.patch("/users/{user_id}/plan")
+def update_user_plan(user_id: int, payload: UserPlanUpdate):
+    """Update a user plan (free, pro, agency, owner)."""
+    valid_plans = ["free", "pro", "agency", "owner"]
+    if payload.plan.lower() not in valid_plans:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Invalid plan. Must be one of: {valid_plans}")
+    
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        old_plan = user.plan
+        user.plan = payload.plan.lower()
+        session.commit()
+        
+        logger.info(f"User {user.email} plan changed: {old_plan} -> {user.plan}")
+        
+        return {
+            "id": user.id,
+            "email": user.email,
+            "old_plan": old_plan,
+            "new_plan": user.plan,
+            "message": f"Plan updated to {user.plan}"
+        }
+    finally:
+        session.close()
+
+
+@router.delete("/users/{user_id}")
+def delete_user(user_id: int):
+    """Delete a user account."""
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if user.email == "admin@sharkted.fr":
+            from fastapi import HTTPException
+            raise HTTPException(status_code=403, detail="Cannot delete admin account")
+        
+        email = user.email
+        session.delete(user)
+        session.commit()
+        
+        logger.info(f"User deleted: {email}")
+        return {"message": f"User {email} deleted"}
+    finally:
+        session.close()

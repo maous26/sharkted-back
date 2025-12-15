@@ -126,3 +126,46 @@ def enqueue_adidas(
 ):
     """Collecte un produit Adidas (actuellement bloqué)."""
     return _enqueue_job(collect_adidas_product, url, "adidas", creds, request)
+
+
+# KITH scraper - bulk collection
+from app.jobs_kith import collect_kith_collection, collect_all_kith
+
+@router.post("/kith/collection")
+def enqueue_kith_collection(
+    collection: str = "footwear-sale",
+    creds: HTTPAuthorizationCredentials = Depends(bearer),
+):
+    """Collecte une collection KITH EU (footwear-sale, kids-footwear-sale, etc.)."""
+    user = get_user_from_creds(creds)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    queue = queue_high if user.get("is_premium") else queue_low
+    job = queue.enqueue(
+        collect_kith_collection,
+        collection,
+        job_timeout=300,
+        result_ttl=3600,
+    )
+    
+    return {"job_id": job.id, "queue": queue.name, "source": "kith", "collection": collection, "status": "enqueued"}
+
+
+@router.post("/kith/all")
+def enqueue_kith_all(
+    creds: HTTPAuthorizationCredentials = Depends(bearer),
+):
+    """Collecte toutes les collections KITH EU (sale + kids)."""
+    user = get_user_from_creds(creds)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    queue = queue_high if user.get("is_premium") else queue_low
+    job = queue.enqueue(
+        collect_all_kith,
+        job_timeout=600,
+        result_ttl=3600,
+    )
+    
+    return {"job_id": job.id, "queue": queue.name, "source": "kith", "status": "enqueued"}

@@ -273,3 +273,41 @@ def get_proxy_stats():
     """Get proxy pool statistics."""
     pool = get_proxy_pool()
     return pool.get_stats()
+
+
+# =============================================================================
+# VINTED STATS RESCRAPING
+# =============================================================================
+
+@router.post("/rescrape-vinted-stats")
+def rescrape_vinted_stats(
+    limit: int = Query(50, ge=1, le=200),
+    force: bool = Query(False, description="Force rescrape even if stats exist"),
+):
+    """
+    Lance le rescoring des deals avec les stats Vinted.
+    
+    Args:
+        limit: Nombre de deals à traiter
+        force: Forcer le rescrape même si les stats existent déjà
+    
+    Returns:
+        Job ID et status
+    """
+    from app.jobs_scoring import rescore_deals_batch
+    
+    job = queue_default.enqueue(
+        rescore_deals_batch,
+        limit,
+        force,
+        job_timeout=1800,  # 30 minutes max
+        result_ttl=3600,
+    )
+    
+    return {
+        "status": "enqueued",
+        "job_id": job.id,
+        "limit": limit,
+        "force": force,
+        "message": f"Rescraping Vinted stats for up to {limit} deals",
+    }

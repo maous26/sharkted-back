@@ -1,12 +1,12 @@
 {
-  "_comment": "Configuration des proxies pour Sharkted",
+  "_comment": "Proxies rotatifs maison",
   "datacenter": [
     {
-      "name": "vps1-squid",
-      "endpoint": "72.62.90.196:3128",
+      "name": "local-squid",
+      "endpoint": "172.17.0.1:3128",
       "protocol": "http",
       "enabled": true,
-      "weight": 1
+      "weight": 2
     }
   ],
   "residential": []

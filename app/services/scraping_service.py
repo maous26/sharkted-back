@@ -101,17 +101,26 @@ SOURCE_LISTING_URLS: Dict[str, List[str]] = {
         # Puis collections normales pour détecter les erreurs de prix
         "https://www.courir.com/fr/c/homme/chaussures/",
         "https://www.courir.com/fr/c/femme/chaussures/",
+        # ENFANTS - Gros prescripteurs sneakers
+        "https://www.courir.com/fr/c/enfant/chaussures/",
+        "https://www.courir.com/fr/c/enfant/promotions/",
     ],
     "footlocker": [
         # Nécessite proxy résidentiel - désactivé pour l'instant
         "https://www.footlocker.fr/fr/category/soldes.html",
         "https://www.footlocker.fr/category/hommes/chaussures.html",
+        # ENFANTS - Gros prescripteurs sneakers
+        "https://www.footlocker.fr/fr/category/enfants/chaussures.html",
+        "https://www.footlocker.fr/fr/category/soldes/enfants.html",
     ],
     "size": [
         # SOLDES en priorité absolue (UK = meilleures promos)
         "https://www.size.co.uk/sale/",
         "https://www.size.co.uk/mens/footwear/sale/",
         "https://www.size.co.uk/womens/footwear/sale/",
+        # ENFANTS - Gros prescripteurs sneakers
+        "https://www.size.co.uk/kids/footwear/sale/",
+        "https://www.size.co.uk/kids/footwear/",
         # Nouveautés pour erreurs de prix
         "https://www.size.co.uk/mens/footwear/",
     ],
@@ -120,6 +129,9 @@ SOURCE_LISTING_URLS: Dict[str, List[str]] = {
         "https://www.jdsports.fr/promo/",
         "https://www.jdsports.fr/homme/chaussures-homme/promo/",
         "https://www.jdsports.fr/femme/chaussures-femme/promo/",
+        # ENFANTS - Gros prescripteurs sneakers
+        "https://www.jdsports.fr/enfant/chaussures-enfant/promo/",
+        "https://www.jdsports.fr/enfant/chaussures-enfant/",
         # Collections normales pour erreurs de prix
         "https://www.jdsports.fr/homme/chaussures-homme/baskets/",
         "https://www.jdsports.fr/femme/chaussures-femme/baskets/",
