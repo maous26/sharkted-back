@@ -178,6 +178,14 @@ SOURCE_POLICIES: Dict[str, SourcePolicy] = {
             category_patterns=["/homme/chaussures-homme/"],
         ),
     ),
+    "kith": SourcePolicy(
+        mode=CollectMode.DIRECT,
+        base_interval_sec=120,
+        allow_slow=True,
+        allow_proxy=False,
+        enabled=True,
+        reason="Shopify JSON API - pas de protection",
+    ),
     "adidas": SourcePolicy(
         mode=CollectMode.BLOCKED,
         enabled=False,
