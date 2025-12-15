@@ -42,9 +42,13 @@ def _deal_to_frontend_format(deal, score=None, vinted=None):
         "stock_available": deal.in_stock,
         "source_name": deal.source,
         "detected_at": deal.first_seen_at.isoformat() if deal.first_seen_at else None,
-        # Score data
+        # Score data with detailed breakdown
         "score": {
             "flip_score": score.flip_score,
+            "margin_score": score.margin_score,
+            "liquidity_score": score.liquidity_score,
+            "popularity_score": score.popularity_score,
+            "score_breakdown": score.score_breakdown or {},
             "recommended_action": score.recommended_action.lower() if score.recommended_action else None,
             "recommended_price": score.recommended_price,
             "confidence": score.confidence,

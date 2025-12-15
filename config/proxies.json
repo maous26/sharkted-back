@@ -1,5 +1,13 @@
 {
-  "_comment": "Configuration des proxies pour Sharkted - Remplacer les valeurs YOUR_* par vos credentials",
-  "datacenter": [],
+  "_comment": "Configuration des proxies pour Sharkted",
+  "datacenter": [
+    {
+      "name": "vps1-squid",
+      "endpoint": "72.62.90.196:3128",
+      "protocol": "http",
+      "enabled": true,
+      "weight": 1
+    }
+  ],
   "residential": []
 }

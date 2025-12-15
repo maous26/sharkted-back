@@ -11,6 +11,7 @@ import json
 from typing import Optional
 
 import cloudscraper
+from app.utils.http_stealth import create_stealth_scraper, get_stealth_headers, random_delay, get_proxy, should_use_proxy
 import requests.exceptions
 
 from app.normalizers.item import DealItem
@@ -59,7 +60,11 @@ def _extract_product_data(html: str, url: str) -> dict:
                 if ld_data.get("@type") == "Product":
                     data["name"] = ld_data.get("name")
                     data["brand"] = ld_data.get("brand", {}).get("name")
-                    data["image"] = ld_data.get("image")
+                    image = ld_data.get("image")
+                    if isinstance(image, list):
+                        data["image"] = image[0] if image else None
+                    else:
+                        data["image"] = image
                     if "offers" in ld_data:
                         offers = ld_data["offers"]
                         if isinstance(offers, dict):
@@ -145,12 +150,11 @@ def _extract_product_data(html: str, url: str) -> dict:
 @retry_on_network_errors(retries=2, source=SOURCE)
 def fetch_size_product(url: str) -> DealItem:
     """Récupère et parse un produit Size UK."""
-    scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "windows", "mobile": False}
-    )
+    scraper, headers = create_stealth_scraper("size")
 
     try:
-        resp = scraper.get(url, timeout=30)
+        proxies = get_proxy() if should_use_proxy("size") else None
+        resp = scraper.get(url, headers=headers, proxies=proxies, timeout=30)
     except requests.exceptions.Timeout as e:
         raise TimeoutError("Timeout après 30s", source=SOURCE, url=url) from e
     except requests.exceptions.ConnectionError as e:

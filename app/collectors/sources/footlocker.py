@@ -8,6 +8,7 @@ import re
 from typing import Optional
 
 import cloudscraper
+from app.utils.http_stealth import create_stealth_scraper, get_stealth_headers, random_delay, get_proxy, should_use_proxy
 import requests.exceptions
 
 from app.normalizers.item import DealItem
@@ -43,6 +44,8 @@ def _extract_product_data(html: str, url: str) -> dict:
     data = {
         "name": None,
         "price": None,
+        "original_price": None,
+        "discount_percent": None,
         "currency": "EUR",
         "image": None,
         "sku": _extract_sku_from_url(url),
@@ -77,6 +80,22 @@ def _extract_product_data(html: str, url: str) -> dict:
                 break
         except (json.JSONDecodeError, KeyError):
             continue
+    
+    # Prix original (prix barré dans le HTML)
+    was_price = re.search(r'class="[^"]*(?:was|strike|crossed|old|original)[^"]*"[^>]*>([^<]*[0-9]+[,.]?[0-9]*)', html, re.IGNORECASE)
+    if was_price:
+        try:
+            price_str = re.sub(r'[^\d.,]', '', was_price.group(1)).replace(",", ".")
+            if price_str:
+                data["original_price"] = float(price_str)
+        except ValueError:
+            pass
+    
+    # Calcul discount_percent
+    if data["price"] and data["original_price"] and data["original_price"] > data["price"]:
+        data["discount_percent"] = round(
+            (1 - data["price"] / data["original_price"]) * 100, 1
+        )
 
     # Fallback: meta tags si JSON-LD incomplet
     if not data["name"]:
@@ -105,12 +124,11 @@ def fetch_footlocker_product(url: str) -> DealItem:
         DataExtractionError: Si données non trouvées
         ValidationError: Si données invalides
     """
-    scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "windows", "mobile": False}
-    )
+    scraper, headers = create_stealth_scraper("footlocker")
 
     try:
-        resp = scraper.get(url, timeout=30)
+        proxies = get_proxy() if should_use_proxy("footlocker") else None
+        resp = scraper.get(url, headers=headers, proxies=proxies, timeout=30)
     except requests.exceptions.Timeout as e:
         raise TimeoutError(
             "Timeout après 30s",
@@ -181,9 +199,12 @@ def fetch_footlocker_product(url: str) -> DealItem:
         external_id=external_id,
         title=data["name"],
         price=data["price"],
+        original_price=data.get("original_price"),
+        discount_percent=data.get("discount_percent"),
         currency=data["currency"],
         url=url,
         image_url=data["image"],
         seller_name=data["brand"],
+        brand=data["brand"],
         raw=data,
     )

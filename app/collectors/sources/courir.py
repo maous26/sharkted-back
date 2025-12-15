@@ -1,8 +1,6 @@
 """
 Collector Courir - Extraction de produits via parsing HTML + JSON-LD.
-
-Courir.com est accessible via cloudscraper mais le JSON-LD Product est incomplet.
-On complète avec le parsing HTML.
+Version 3: Parse JSON-LD ligne par ligne.
 """
 import json
 import re
@@ -31,7 +29,7 @@ _JSONLD_RE = re.compile(
 
 
 def _extract_sku_from_url(url: str) -> Optional[str]:
-    """Extrait le SKU de l'URL (ex: vans-era-floral-1489580.html -> 1489580)."""
+    """Extrait le SKU de l'URL."""
     match = re.search(r'-(\d{6,})\.html', url)
     return match.group(1) if match else None
 
@@ -39,62 +37,88 @@ def _extract_sku_from_url(url: str) -> Optional[str]:
 def _extract_product_data(html: str, url: str) -> dict:
     """
     Extrait les données produit depuis le HTML.
-    Combine JSON-LD + parsing HTML pour données complètes.
+    Parse JSON-LD ligne par ligne pour gérer les objets concaténés.
     """
     data = {
         "name": None,
         "price": None,
+        "original_price": None,
+        "discount_percent": None,
         "currency": "EUR",
         "image": None,
         "sku": _extract_sku_from_url(url),
         "brand": None,
     }
 
-    # 1. Essayer JSON-LD
-    for match in _JSONLD_RE.finditer(html):
-        try:
-            jsonld = json.loads(match.group(1).strip())
-            if isinstance(jsonld, dict) and jsonld.get("@type") == "Product":
-                data["brand"] = jsonld.get("name")  # C'est la marque, pas le nom complet
-                offers = jsonld.get("offers", {})
-                if isinstance(offers, dict):
-                    # lowPrice est le prix de vente
-                    data["price"] = offers.get("lowPrice") or offers.get("price")
-                    data["currency"] = offers.get("priceCurrency", "EUR")
-        except (json.JSONDecodeError, KeyError):
-            continue
-
-    # 2. Compléter avec meta tags
-    og_title = re.search(r'<meta property="og:title"[^>]*content="([^"]+)"', html)
-    og_image = re.search(r'<meta property="og:image"[^>]*content="([^"]+)"', html)
-
-    if og_title:
-        data["name"] = og_title.group(1).strip()
-    if og_image:
-        data["image"] = og_image.group(1)
-
-    # 3. Fallback: titre de la page
-    if not data["name"]:
-        title_match = re.search(r'<title>([^<]+)</title>', html)
-        if title_match:
-            # Format: "Nom Produit | Courir"
-            title = title_match.group(1).split("|")[0].strip()
-            data["name"] = title
-
-    # 4. Fallback prix: chercher dans le HTML
-    if not data["price"]:
-        # Pattern prix Courir
-        price_match = re.search(r'class="[^"]*current-price[^"]*"[^>]*>([0-9,.]+)\s*€', html)
-        if not price_match:
-            price_match = re.search(r'data-price="([0-9,.]+)"', html)
-        if not price_match:
-            price_match = re.search(r'"price":\s*"?([0-9]+(?:[.,][0-9]+)?)"?', html)
-        if price_match:
-            price_str = price_match.group(1).replace(",", ".")
+    # 1. Parser JSON-LD (peut contenir plusieurs objets sur des lignes séparées)
+    for script_match in _JSONLD_RE.finditer(html):
+        raw_content = script_match.group(1).strip()
+        
+        # Parser chaque ligne comme un objet JSON séparé
+        for line in raw_content.split("\n"):
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+                
             try:
-                data["price"] = float(price_str)
-            except ValueError:
-                pass
+                jsonld = json.loads(line)
+                
+                if jsonld.get("@type") == "Product":
+                    # Nom du produit
+                    if not data["name"]:
+                        data["name"] = jsonld.get("name")
+                    
+                    # Marque
+                    if not data["brand"]:
+                        brand = jsonld.get("brand")
+                        if isinstance(brand, dict):
+                            data["brand"] = brand.get("name")
+                        elif isinstance(brand, str):
+                            data["brand"] = brand
+                    
+                    # Image
+                    if not data["image"]:
+                        image = jsonld.get("image")
+                        if isinstance(image, list) and image:
+                            data["image"] = image[0]
+                        elif isinstance(image, str):
+                            data["image"] = image
+                    
+                    # Prix depuis offers
+                    if not data["price"]:
+                        offers = jsonld.get("offers", {})
+                        if isinstance(offers, dict):
+                            price = offers.get("price")
+                            if price:
+                                data["price"] = float(price)
+                            data["currency"] = offers.get("priceCurrency", "EUR")
+                            
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+
+    # 2. Chercher discount dans le JSON inline (GTM data)
+    discount_match = re.search(r'"discount"\s*:\s*(\d+)', html)
+    if discount_match:
+        discount = int(discount_match.group(1))
+        if discount > 0 and data["price"]:
+            data["discount_percent"] = float(discount)
+            # Calculer prix original
+            data["original_price"] = round(data["price"] / (1 - discount/100), 2)
+
+    # 3. Fallback: meta tags
+    if not data["name"]:
+        og_title = re.search(r'<meta property="og:title"[^>]*content="([^"]+)"', html)
+        if og_title:
+            data["name"] = og_title.group(1).strip()
+    
+    if not data["image"]:
+        og_image = re.search(r'<meta property="og:image"[^>]*content="([^"]+)"', html)
+        if og_image:
+            data["image"] = og_image.group(1)
+
+    # 4. Construire nom complet avec marque si nécessaire
+    if data["brand"] and data["name"] and data["brand"].lower() not in data["name"].lower():
+        data["name"] = f"{data['brand']} {data['name']}"
 
     return data
 
@@ -103,21 +127,19 @@ def _extract_product_data(html: str, url: str) -> dict:
 def fetch_courir_product(url: str) -> DealItem:
     """
     Récupère et parse un produit Courir.
-
-    Raises:
-        BlockedError: Si bloqué
-        TimeoutError: Si timeout réseau
-        NetworkError: Si erreur réseau
-        HTTPError: Si erreur HTTP autre
-        DataExtractionError: Si données non trouvées
-        ValidationError: Si données invalides
+    Utilise cloudscraper natif pour bypass Cloudflare.
     """
+    # Créer scraper sans override de headers
     scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        browser={
+            "browser": "chrome",
+            "platform": "windows",
+            "mobile": False,
+        }
     )
 
     try:
-        resp = scraper.get(url, timeout=30)
+        resp = scraper.get(url, timeout=30, allow_redirects=True)
     except requests.exceptions.Timeout as e:
         raise TimeoutError(
             "Timeout après 30s",
@@ -137,12 +159,15 @@ def fetch_courir_product(url: str) -> DealItem:
             url=url,
         ) from e
 
+    # Mettre à jour l'URL finale après redirection
+    final_url = resp.url
+
     # Vérifier le status HTTP
     if resp.status_code == 403:
         raise BlockedError(
             "Bloqué par protection anti-bot",
             source=SOURCE,
-            url=url,
+            url=final_url,
             status_code=403,
         )
 
@@ -150,7 +175,7 @@ def fetch_courir_product(url: str) -> DealItem:
         raise DataExtractionError(
             "Produit non trouvé (404)",
             source=SOURCE,
-            url=url,
+            url=final_url,
         )
 
     if resp.status_code >= 400:
@@ -158,18 +183,18 @@ def fetch_courir_product(url: str) -> DealItem:
             "Erreur HTTP",
             status_code=resp.status_code,
             source=SOURCE,
-            url=url,
+            url=final_url,
         )
 
     # Extraire les données
-    data = _extract_product_data(resp.text, url)
+    data = _extract_product_data(resp.text, final_url)
 
     # Validation
     if not data["name"]:
         raise DataExtractionError(
             "Nom du produit non trouvé",
             source=SOURCE,
-            url=url,
+            url=final_url,
         )
 
     if not data["price"] or data["price"] <= 0:
@@ -177,20 +202,23 @@ def fetch_courir_product(url: str) -> DealItem:
             f"Prix invalide: {data['price']}",
             field="price",
             source=SOURCE,
-            url=url,
+            url=final_url,
         )
 
     # Construire l'external_id
-    external_id = data["sku"] or url.split("/")[-1].replace(".html", "")
+    external_id = data["sku"] or final_url.split("/")[-1].replace(".html", "")
 
     return DealItem(
         source=SOURCE,
         external_id=external_id,
         title=data["name"],
         price=data["price"],
+        original_price=data.get("original_price"),
+        discount_percent=data.get("discount_percent"),
         currency=data["currency"],
-        url=url,
+        url=final_url,
         image_url=data["image"],
         seller_name=data["brand"],
+        brand=data["brand"],
         raw=data,
     )

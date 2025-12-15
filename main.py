@@ -26,6 +26,8 @@ from app.routers.alerts import router as alerts_router
 from app.routers.scoring import router as scoring_router
 from app.routers.admin import router as admin_router
 from app.routers.proxies import router as proxies_router
+from app.routers.drops import router as drops_router
+from app.routers.favorites import router as favorites_router
 from app.core.config import JWT_SECRET, JWT_ALGO
 from app.services.deal_service import (
     get_deal,
@@ -232,6 +234,8 @@ app.include_router(alerts_router)     # /v1/alerts/*
 app.include_router(scoring_router)    # /v1/scoring/*
 app.include_router(admin_router)
 app.include_router(proxies_router)      # /v1/proxies/*
+app.include_router(drops_router)      # /v1/drops/*
+app.include_router(favorites_router)  # /v1/favorites/*
 
 def get_user_from_creds(creds):
     """

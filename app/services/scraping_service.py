@@ -145,7 +145,7 @@ SOURCE_LISTING_URLS: Dict[str, List[str]] = {
 # Patterns pour extraire les URLs de produits
 PRODUCT_URL_PATTERNS: Dict[str, List[str]] = {
     "courir": [
-        r'href="(https://www\.courir\.com/fr/p/[^"]+\.html)"',
+        r'data-productid="(\d+)"',  # Extract SKU from data-productid
         r'href="(/fr/p/[^"]+\.html)"',
     ],
     "footlocker": [
@@ -195,8 +195,11 @@ def extract_product_urls(html: str, source: str) -> Set[str]:
         matches = re.findall(pattern, html, re.IGNORECASE)
         for match in matches:
             url = match
+            # Cas special Courir: data-productid renvoie juste le SKU
+            if source == "courir" and url.isdigit():
+                url = f"{base_url}/fr/p/{url}.html"
             # Compléter les URLs relatives
-            if url.startswith("/"):
+            elif url.startswith("/"):
                 url = base_url + url
             # Nettoyer l'URL
             url = url.split("?")[0]  # Enlever les query params

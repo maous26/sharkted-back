@@ -657,7 +657,10 @@ class ScraperFactory:
             }
         )
         
-        scraper.headers.update(cls.get_headers(target))
+        # Skip header override for targets that need cloudscraper defaults (Cloudflare protected)
+        cloudflare_targets = {"courir", "footlocker"}
+        if target not in cloudflare_targets:
+            scraper.headers.update(cls.get_headers(target))
         
         proxies = None
         if method == ScrapingMethod.HTTP_DATACENTER:
