@@ -34,6 +34,7 @@ class CollectMode(str, Enum):
     PROXY = "proxy"
     BROWSER = "browser"
     BLOCKED = "blocked"
+    WEB_UNLOCKER = "web_unlocker"  # Premium - BrightData Web Unlocker
 
 
 @dataclass
@@ -127,6 +128,7 @@ class SourcePolicy:
     allow_browser: bool = False  # Peut escalader vers BROWSER
     enabled: bool = True
     reason: Optional[str] = None  # Raison si disabled/blocked
+    plan_required: str = "free"  # "free", "basic", "premium"
 
     # Config warmup pour DIRECT_SLOW
     warmup: Optional[WarmupConfig] = None
@@ -191,27 +193,61 @@ SOURCE_POLICIES: Dict[str, SourcePolicy] = {
         enabled=False,
         reason="Akamai 403 - protection trop forte même avec DIRECT_SLOW",
     ),
+    # === SOURCES GRATUITES SUPPLÉMENTAIRES ===
+    "bstn": SourcePolicy(
+        mode=CollectMode.DIRECT,
+        base_interval_sec=90,
+        allow_slow=True,
+        allow_proxy=True,
+        enabled=True,
+        reason="Shopify-based - accès direct possible",
+    ),
+    "footpatrol": SourcePolicy(
+        mode=CollectMode.DIRECT,
+        base_interval_sec=60,
+        allow_slow=True,
+        allow_proxy=True,
+        enabled=True,
+        warmup=WarmupConfig(
+            homepage="https://www.footpatrol.com/",
+            category_patterns=["/sale/", "/mens/footwear/"],
+        ),
+    ),
     "snipes": SourcePolicy(
         mode=CollectMode.BROWSER,
         allow_browser=True,
         enabled=False,
         reason="SPA - Playwright requis (non implémenté)",
     ),
-    # Sources testées avec DIRECT_SLOW - bloquées (IP datacenter détectée)
+    # === SOURCES PREMIUM (Web Unlocker requis) ===
+    "galerieslafayette": SourcePolicy(
+        mode=CollectMode.WEB_UNLOCKER,
+        enabled=True,
+        plan_required="premium",
+        reason="Protection anti-bot - Web Unlocker requis",
+    ),
+    "printemps": SourcePolicy(
+        mode=CollectMode.WEB_UNLOCKER,
+        enabled=True,
+        plan_required="premium",
+        reason="Protection anti-bot - Web Unlocker requis",
+    ),
+    "sns": SourcePolicy(
+        mode=CollectMode.WEB_UNLOCKER,
+        enabled=True,
+        plan_required="premium",
+        reason="Sneakersnstuff - Web Unlocker requis",
+    ),
+    # === SOURCES BLOQUÉES ===
     "ralphlauren": SourcePolicy(
         mode=CollectMode.BLOCKED,
         enabled=False,
         reason="307 redirect + protection - nécessite proxy résidentiel",
     ),
-    "galerieslafayette": SourcePolicy(
+    "adidas": SourcePolicy(
         mode=CollectMode.BLOCKED,
         enabled=False,
-        reason="403 - protection anti-bot forte",
-    ),
-    "printemps": SourcePolicy(
-        mode=CollectMode.BLOCKED,
-        enabled=False,
-        reason="403 - protection anti-bot forte",
+        reason="Akamai 403 - protection trop forte même avec DIRECT_SLOW",
     ),
 }
 

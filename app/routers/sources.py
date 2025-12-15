@@ -65,7 +65,7 @@ def get_sources_status():
             "last_scraped_at": m.last_success_at.isoformat() if m.last_success_at else None,
             "last_error": m.last_error_type if m.last_error_type else None,
             "total_deals_found": m.total_success,
-            "plan_required": "free",
+            "plan_required": getattr(policy, "plan_required", "free"),
             "enabled": policy.enabled,
             "configured_mode": policy.mode.value,
             "current_mode": m.current_mode.value,
