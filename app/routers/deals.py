@@ -19,6 +19,7 @@ from app.models.deal import Deal
 from app.models.deal_score import DealScore
 from app.models.vinted_stats import VintedStats
 from app.models.user import User
+from app.models.subscription import get_user_tier, get_tier_limits, get_tier_sources, SubscriptionTier
 from app.core.config import JWT_SECRET, JWT_ALGO
 from sqlalchemy import func, or_, and_
 from sqlalchemy.orm import joinedload
@@ -26,12 +27,11 @@ from sqlalchemy.orm import joinedload
 router = APIRouter(prefix="/v1/deals", tags=["deals"])
 
 
-def get_user_categories_from_request(request: Request) -> List[str]:
+def _get_request_user(request: Request) -> Optional[User]:
     """
-    Extract user categories from token if present.
-    Returns empty list for anonymous users or users without category preferences.
+    Extract user from token manually for segmentation logic.
+    Returns None for anonymous.
     """
-    # Try cookie first, then Authorization header
     token = request.cookies.get("access_token")
     if not token:
         auth_header = request.headers.get("Authorization", "")
@@ -39,24 +39,26 @@ def get_user_categories_from_request(request: Request) -> List[str]:
             token = auth_header[7:]
 
     if not token:
-        return []
+        return None
 
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
         email = payload.get("sub")
         if not email:
-            return []
+            return None
     except JWTError:
-        return []
+        return None
 
-    # Get user categories from DB
+    # We need a new session here usually, but be careful with connections
     with get_db_session() as session:
+        # Eager load preferences for categories
+        # Note: detached object might be risky if we access relationships later outside session
+        # But here we just need plan and preferences which are basic columns/JSON
         user = session.query(User).filter(User.email == email).first()
-        if user and user.preferences:
-            categories = user.preferences.get("categories", [])
-            if categories and len(categories) > 0:
-                return categories
-        return []
+        if user:
+            session.expunge(user) # Detach to use outside
+            return user
+        return None
 
 
 def _deal_to_frontend_format(deal, score=None, vinted=None):
@@ -123,32 +125,65 @@ def list_all_deals(
     sort_order: str = Query("desc", description="Sort order: asc, desc"),
 ):
     """
-    Liste tous les deals avec filtres avancés.
-    Filtre automatiquement par catégories utilisateur si connecté.
+    Liste tous les deals avec segmentation par offre (Freemium/Shark/Whale).
     """
-    # Get user categories (extracted before main DB session)
-    user_categories = get_user_categories_from_request(request)
+    # 1. Identify User and Tier
+    user = _get_request_user(request)
+    if user and user.subscription_status == "active":
+        plan = user.plan
+    else:
+        plan = "free"  # Default to free if no auth or inactive sub
     
+    tier = get_user_tier(plan)
+    limits = get_tier_limits(tier)
+    allowed_sources = get_tier_sources(tier)
+    
+    # 2. Setup Query
     with get_db_session() as session:
-        # Base query with joins
+        # Base query
         query = session.query(Deal).outerjoin(
             DealScore, Deal.id == DealScore.deal_id
         ).outerjoin(
             VintedStats, Deal.id == VintedStats.deal_id
         )
         
-        # Apply user category filter from preferences
-        # If user has categories selected, filter by those categories
-        # BUT also include deals without category (NULL) since we cannot classify them yet
-        if user_categories:
-            query = query.filter(
-                or_(
-                    Deal.category.in_(user_categories),
-                    Deal.category.is_(None)  # Include uncategorized deals
-                )
-            )
+        # 3. Apply Segmentation Filters
         
-        # Apply filters
+        # Source Restrictions (Shark/Freemium vs Whale)
+        if allowed_sources:
+             query = query.filter(Deal.source.in_(allowed_sources))
+
+        # Category Restrictions (Freemium -> Sneakers only)
+        # Note: If user passes ?category=other, it will return empty if restricted
+        if limits.get("allowed_categories"):
+            tier_cats = limits["allowed_categories"]
+            # If request asks for a specific category, check if it's allowed
+            if category:
+                if category not in tier_cats:
+                    # User asked for forbidden category -> Return empty or filter to 0
+                    query = query.filter(1 == 0) # Force empty
+                else:
+                    query = query.filter(Deal.category == category)
+            else:
+                # Force limit to allowed categories
+                query = query.filter(Deal.category.in_(tier_cats))
+        else:
+            # User Preference Categories (for Paid users who have preferences)
+            if user and user.preferences:
+                pref_cats = user.preferences.get("categories", [])
+                if pref_cats and len(pref_cats) > 0 and not category:
+                    # Apply preferences only if no explicit filter
+                    query = query.filter(
+                        or_(
+                            Deal.category.in_(pref_cats),
+                            Deal.category.is_(None)
+                        )
+                    )
+            # Apply requested filter if any
+            if category:
+                query = query.filter(Deal.category == category)
+
+        # 4. Standard Filters
         if source:
             query = query.filter(Deal.source == source)
         
@@ -160,59 +195,80 @@ def list_all_deals(
                     Deal.title.ilike(f"%{brand}%")
                 )
             )
-        
-        if category:
-            query = query.filter(Deal.category == category)
-        
+            
         if search:
             query = query.filter(Deal.title.ilike(f"%{search}%"))
-        
+            
         if min_price is not None:
             query = query.filter(Deal.price >= min_price)
-        
+            
         if max_price is not None:
             query = query.filter(Deal.price <= max_price)
-        
+            
         if min_score is not None and min_score > 0:
             query = query.filter(DealScore.flip_score >= min_score)
-        
+            
         if min_margin is not None and min_margin > 0:
             query = query.filter(VintedStats.margin_pct >= min_margin)
-        
+            
         if recommended_only:
             query = query.filter(DealScore.recommended_action == "BUY")
-        
-        # Only in stock
+            
+        # Standard: In Stock and Scored
         query = query.filter(Deal.in_stock == True)
+        query = query.filter(DealScore.id != None)
+        query = query.filter(DealScore.flip_score >= 60)
         
-        # IMPORTANT: Only show deals that have been scored (score >= 60)
-        # Deals without score are "pending" and not visible yet
-        query = query.filter(DealScore.id != None)  # Must have a score
-        query = query.filter(DealScore.flip_score >= 60)  # Score must be >= 60
-        
-        # Count total before pagination
-        total = query.count()
-        
-        # Apply sorting
+        # 5. Sorting
         if sort_by == "flip_score":
             sort_col = DealScore.flip_score
         elif sort_by == "margin_pct":
             sort_col = VintedStats.margin_pct
         elif sort_by == "price" or sort_by == "sale_price":
             sort_col = Deal.price
-        else:  # detected_at
-            sort_col = Deal.first_seen_at
-        
-        if sort_order == "asc":
-            query = query.order_by(sort_col.asc().nullslast())
         else:
-            query = query.order_by(sort_col.desc().nullsfirst())
+            sort_col = Deal.first_seen_at
+            
+        # 6. Pagination & Freemium Teaser Logic
         
-        # Apply pagination
-        offset = (page - 1) * per_page
-        deals = query.offset(offset).limit(per_page).all()
-        
-        # Build response with score data
+        if tier == SubscriptionTier.FREEMIUM:
+            # FREEMIUM SPECIAL LOGIC: 5 Deals max. 1 Top (>70), 4 Others.
+            # We ignore page/per_page from request and enforce limit
+            
+            # Fetch Top Deal (Teaser) - Score > 70
+            top_deal_q = query.filter(DealScore.flip_score > 70).order_by(DealScore.flip_score.desc()).limit(1)
+            top_deals = top_deal_q.all()
+            
+            # Fetch Regular Deals - Score <= 70 (to avoid showing more top deals)
+            # Limit 4 (or 5 minus count of top deals)
+            needed = 5 - len(top_deals)
+            regular_q = query.filter(DealScore.flip_score <= 70)
+            
+            if sort_order == "asc":
+                regular_q = regular_q.order_by(sort_col.asc().nullslast())
+            else:
+                 regular_q = regular_q.order_by(sort_col.desc().nullsfirst())
+                 
+            regular_deals = regular_q.limit(needed).all()
+            
+            deals = top_deals + regular_deals
+            total = len(deals) # Artificial total
+            page = 1
+            per_page = 5
+            
+        else:
+            # PAID TIERS (Shark/Whale) - Standard Pagination
+            
+            if sort_order == "asc":
+                query = query.order_by(sort_col.asc().nullslast())
+            else:
+                query = query.order_by(sort_col.desc().nullsfirst())
+            
+            total = query.count()
+            offset = (page - 1) * per_page
+            deals = query.offset(offset).limit(per_page).all()
+
+        # Build Response
         result = []
         for deal in deals:
             score = session.query(DealScore).filter(DealScore.deal_id == deal.id).first()
@@ -224,7 +280,8 @@ def list_all_deals(
             "total": total,
             "page": page,
             "per_page": per_page,
-            "pages": (total + per_page - 1) // per_page,
+            "pages": (total + per_page - 1) // per_page if per_page > 0 else 1,
+            "role": tier, # Return role for frontend debug
         }
 
 
@@ -243,7 +300,11 @@ def deals_stats():
         total = session.query(func.count(Deal.id)).scalar() or 0
 
         # Active deals (in stock)
-        active = session.query(func.count(Deal.id)).filter(Deal.in_stock == True).scalar() or 0
+        # Active deals (in stock AND qualified > 60 score)
+        active = session.query(func.count(Deal.id)).join(DealScore, Deal.id == DealScore.deal_id).filter(
+            Deal.in_stock == True,
+            DealScore.flip_score >= 60
+        ).scalar() or 0
 
         # Deals added today
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
