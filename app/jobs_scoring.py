@@ -42,40 +42,7 @@ async def _score_single_deal(deal_id: int, session) -> Dict:
         return {"deal_id": deal_id, "status": "not_found"}
     
     try:
-        # Récupérer les stats Vinted
-        vinted_data = await get_vinted_stats_for_deal(
-            product_name=deal.title,
-            brand=deal.brand or deal.seller_name,
-            sale_price=deal.price
-        )
-        
-        # Sauvegarder/Mettre à jour les stats Vinted
-        existing_vinted = session.query(VintedStats).filter(VintedStats.deal_id == deal_id).first()
-        if existing_vinted:
-            for key, value in vinted_data.items():
-                if key != 'sample_listings' and hasattr(existing_vinted, key):
-                    setattr(existing_vinted, key, value)
-            existing_vinted.sample_listings = vinted_data.get('sample_listings', [])
-        else:
-            vinted_stats = VintedStats(
-                deal_id=deal_id,
-                nb_listings=vinted_data.get('nb_listings', 0),
-                price_min=vinted_data.get('price_min'),
-                price_max=vinted_data.get('price_max'),
-                price_avg=vinted_data.get('price_avg'),
-                price_median=vinted_data.get('price_median'),
-                price_p25=vinted_data.get('price_p25'),
-                price_p75=vinted_data.get('price_p75'),
-                coefficient_variation=vinted_data.get('coefficient_variation'),
-                margin_euro=vinted_data.get('margin_euro'),
-                margin_pct=vinted_data.get('margin_pct'),
-                liquidity_score=vinted_data.get('liquidity_score'),
-                sample_listings=vinted_data.get('sample_listings', []),
-                search_query=vinted_data.get('query_used', '')
-            )
-            session.add(vinted_stats)
-        
-        # Calculer le score
+        # Pre-scoring: Scoring heuristique rapide (SANS Vinted)
         deal_data = {
             'product_name': deal.title,
             'brand': deal.brand or deal.seller_name,
@@ -85,8 +52,67 @@ async def _score_single_deal(deal_id: int, session) -> Dict:
             'gender': deal.gender,
             'discount_percent': deal.discount_percent or 0,
             'sizes_available': deal.sizes_available,
+            'price': deal.price,
+            'original_price': deal.original_price,
+            'sale_price': deal.price
         }
+
+        # 1. Calcul du score préliminaire (Règles uniquement)
+        pre_score_result = await score_deal(deal_data, vinted_stats=None)
+        pre_flip_score = pre_score_result.get('flip_score', 0)
         
+        logger.info(f"Pre-score for deal {deal_id}: {pre_flip_score}")
+
+        vinted_data = None
+        
+        # 2. Sniper Logic: Scraper Vinted seulement si le potentiel est là (> 65 pour être large)
+        # OU si c'est une marque "Hype" connue (nike, jordan...)
+        is_hype_brand = deal.brand and deal.brand.lower() in ['nike', 'jordan', 'yeezy', 'adidas', 'new balance']
+        
+        if pre_flip_score >= 65 or (is_hype_brand and pre_flip_score >= 50):
+            logger.info(f"Sniper triggered for deal {deal_id} (Score: {pre_flip_score})")
+            try:
+                # Récupérer les stats Vinted (via Browser Worker / Proxy Gratuit)
+                vinted_data = await get_vinted_stats_for_deal(
+                    product_name=deal.title,
+                    brand=deal.brand or deal.seller_name,
+                    sale_price=deal.price
+                )
+            except Exception as e:
+                logger.error(f"Vinted scrape error for {deal_id}: {e}")
+                vinted_data = None
+        else:
+            logger.info(f"Skipping Vinted scrape for deal {deal_id} (Score too low: {pre_flip_score})")
+
+        # Sauvegarder les stats Vinted SI on en a trouvé
+        if vinted_data:
+            existing_vinted = session.query(VintedStats).filter(VintedStats.deal_id == deal_id).first()
+            if existing_vinted:
+                for key, value in vinted_data.items():
+                    if key != 'sample_listings' and hasattr(existing_vinted, key):
+                        setattr(existing_vinted, key, value)
+                existing_vinted.sample_listings = vinted_data.get('sample_listings', [])
+            else:
+                vinted_stats = VintedStats(
+                    deal_id=deal_id,
+                    nb_listings=vinted_data.get('nb_listings', 0),
+                    price_min=vinted_data.get('price_min'),
+                    price_max=vinted_data.get('price_max'),
+                    price_avg=vinted_data.get('price_avg'),
+                    price_median=vinted_data.get('price_median'),
+                    price_p25=vinted_data.get('price_p25'),
+                    price_p75=vinted_data.get('price_p75'),
+                    coefficient_variation=vinted_data.get('coefficient_variation'),
+                    margin_euro=vinted_data.get('margin_euro'),
+                    margin_pct=vinted_data.get('margin_pct'),
+                    liquidity_score=vinted_data.get('liquidity_score'),
+                    sample_listings=vinted_data.get('sample_listings', []),
+                    search_query=vinted_data.get('query_used', '')
+                )
+                session.add(vinted_stats)
+
+        # 3. Calcul du score FINAL (Avec ou sans Vinted)
+        # Si vinted_data est présent, le score sera ajusté avec les vraies marges
         score_result = await score_deal(deal_data, vinted_data)
         
         # Sauvegarder/Mettre à jour le score
@@ -116,13 +142,16 @@ async def _score_single_deal(deal_id: int, session) -> Dict:
         
         session.commit()
         
+        final_margin = vinted_data.get('margin_pct', 0) if vinted_data else score_result.get('estimated_margin_pct', 0)
+
         logger.info(
-            f"Deal scored",
+            f"Deal scored FINAL",
             deal_id=deal_id,
             title=deal.title[:50],
             flip_score=score_result['flip_score'],
             action=score_result['recommended_action'],
-            margin_pct=vinted_data.get('margin_pct', 0),
+            margin_pct=final_margin,
+            with_vinted=bool(vinted_data)
         )
         
         return {
@@ -130,7 +159,8 @@ async def _score_single_deal(deal_id: int, session) -> Dict:
             "status": "scored",
             "flip_score": score_result['flip_score'],
             "action": score_result['recommended_action'],
-            "margin_pct": vinted_data.get('margin_pct', 0),
+            "margin_pct": final_margin,
+            "vinted_checked": bool(vinted_data)
         }
         
     except Exception as e:
