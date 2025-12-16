@@ -157,6 +157,7 @@ class BrowserPool:
             extra_http_headers={
                 "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
             },
+            ignore_https_errors=True,
         )
         
         # Injecter scripts anti-détection
