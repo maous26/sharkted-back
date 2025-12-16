@@ -100,8 +100,8 @@ class VintedService:
         url = self._build_search_url(product_name, brand)
         self.logger.info(f"Scraping Vinted: {product_name} -> {url}")
         
-        # Tracer si on utilise un proxy Web Unlocker
-        use_proxy = get_web_unlocker_proxy() is not None
+        # Récupérer le proxy configuré (Web Unlocker ou gratuit en DB)
+        proxy = get_web_unlocker_proxy()
         
         # Appel via Browser Worker (Synchrone pour l'instant pour compatibilité RQ)
         # On attend l'apparition de la grille pour être sûr
@@ -109,7 +109,8 @@ class VintedService:
             target="vinted", 
             url=url, 
             timeout=30,
-            wait_for_selector='div[data-testid="grid-item"]'
+            wait_for_selector='div[data-testid="grid-item"]',
+            proxy_config=proxy
         )
         
         if error.value != "success" or not content:

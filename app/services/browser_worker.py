@@ -274,6 +274,7 @@ async def browser_fetch(
     url: str,
     timeout: int = 30,
     wait_for_selector: Optional[str] = None,
+    proxy_config: Optional[Dict[str, str]] = None,
 ) -> Tuple[Optional[str], ErrorType, Dict]:
     """
     Fetch une URL avec Playwright.
@@ -298,8 +299,8 @@ async def browser_fetch(
     start_time = time.time()
     
     try:
-        # Obtenir proxy résidentiel
-        proxy = get_proxy("residential")
+        # Obtenir proxy (override ou résidentiel par défaut)
+        proxy = proxy_config if proxy_config else get_proxy("residential")
         metadata["proxy_used"] = proxy is not None
         
         pool = await get_browser_pool()
@@ -368,8 +369,9 @@ def browser_fetch_sync(
     url: str,
     timeout: int = 30,
     wait_for_selector: Optional[str] = None,
+    proxy_config: Optional[Dict[str, str]] = None,
 ) -> Tuple[Optional[str], ErrorType, Dict]:
     """
     Wrapper synchrone pour browser_fetch (utilisable dans les jobs RQ).
     """
-    return asyncio.run(browser_fetch(target, url, timeout, wait_for_selector))
+    return asyncio.run(browser_fetch(target, url, timeout, wait_for_selector, proxy_config))
