@@ -77,77 +77,45 @@ def _extract_product_from_jsonld(html: str) -> Optional[dict]:
 
 def fetch_adidas_product(url: str) -> DealItem:
     """
-    Récupère et parse un produit Adidas.
-
-    Raises:
-        BlockedError: Si bloqué par Akamai (403)
-        TimeoutError: Si timeout réseau
-        NetworkError: Si erreur réseau
-        HTTPError: Si erreur HTTP autre
-        DataExtractionError: Si pas de JSON-LD trouvé
-        ValidationError: Si données invalides
+    Récupère et parse un produit Adidas via Playwright + Proxy.
+    Contourne Akamai.
     """
-    scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "windows", "mobile": False}
+    from app.services.browser_worker import browser_fetch_sync
+    from app.services.proxy_service import get_web_unlocker_proxy
+    
+    proxy = get_web_unlocker_proxy()
+    
+    # 1. Fetch via Browser Worker
+    content, error, meta = browser_fetch_sync(
+        target="adidas",
+        url=url,
+        timeout=60, # Akamai peut être lent
+        wait_for_selector='script[type="application/ld+json"]', # Attendre le JSON-LD
+        proxy_config=proxy
     )
+    
+    if error.value != "success" or not content:
+        # Mapper les erreurs
+        if error.value == "blocked":
+            raise BlockedError("Bloqué par Akamai", source=SOURCE, url=url)
+        elif error.value == "timeout":
+            raise TimeoutError("Timeout browser", source=SOURCE, url=url)
+        else:
+            raise NetworkError(f"Erreur fetch: {error.value}", source=SOURCE, url=url)
 
-    try:
-        resp = scraper.get(url, timeout=30)
-    except requests.exceptions.Timeout as e:
-        raise TimeoutError(
-            f"Timeout après 30s",
-            source=SOURCE,
-            url=url,
-        ) from e
-    except requests.exceptions.ConnectionError as e:
-        raise NetworkError(
-            f"Erreur de connexion: {e}",
-            source=SOURCE,
-            url=url,
-        ) from e
-    except requests.exceptions.RequestException as e:
-        raise NetworkError(
-            f"Erreur réseau: {e}",
-            source=SOURCE,
-            url=url,
-        ) from e
-
-    # Vérifier le blocage
-    if _is_blocked(resp.text, resp.status_code):
-        raise BlockedError(
-            f"Bloqué par protection Akamai",
-            source=SOURCE,
-            url=url,
-            status_code=resp.status_code,
-        )
-
-    # Vérifier le status HTTP
-    if resp.status_code >= 400:
-        raise HTTPError(
-            f"Erreur HTTP",
-            status_code=resp.status_code,
-            source=SOURCE,
-            url=url,
-        )
-
-    # Extraire le JSON-LD
-    prod = _extract_product_from_jsonld(resp.text)
+    # 2. Parsing JSON-LD (réutilisation de la logique existante)
+    prod = _extract_product_from_jsonld(content)
     if not prod:
         raise DataExtractionError(
-            "Aucun Product JSON-LD trouvé dans la page",
+            "Aucun Product JSON-LD trouvé (après JS)",
             source=SOURCE,
             url=url,
         )
 
-    # Parser les données
+    # 3. Extraction standard
     title = prod.get("name")
     if not title:
-        raise ValidationError(
-            "Titre du produit manquant",
-            field="name",
-            source=SOURCE,
-            url=url,
-        )
+        raise ValidationError("Titre manquant", field="name", source=SOURCE, url=url)
 
     image = None
     if isinstance(prod.get("image"), list) and prod["image"]:
@@ -163,15 +131,10 @@ def fetch_adidas_product(url: str) -> DealItem:
         price = float(offers.get("price", 0))
     except (ValueError, TypeError):
         price = 0.0
-
-    if price <= 0:
-        raise ValidationError(
-            f"Prix invalide: {offers.get('price')}",
-            field="price",
-            source=SOURCE,
-            url=url,
-        )
-
+        
+    # Adidas affiche parfois le prix plein sans discount dans le JSON-LD principal
+    # On pourrait parser le HTML pour trouver le prix remisé si besoin
+    
     return DealItem(
         source=SOURCE,
         external_id=str(prod.get("sku") or url),
