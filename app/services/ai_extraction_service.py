@@ -91,22 +91,26 @@ async def extract_product_name_ai(title: str, brand: Optional[str] = None) -> Di
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
         
-        prompt = f"""Extrait les informations de ce produit sneaker/streetwear pour une recherche Vinted.
+        prompt = f"""Analyse ce produit pour une recherche Vinted précise.
 
-Titre: {clean_title}
-Marque indiquee: {brand or "non specifiee"}
+Input Title: {clean_title}
+Input Brand: {brand or "N/A"}
 
-Reponds UNIQUEMENT en JSON (pas de markdown):
-{{"brand": "marque", "model": "modele sans couleur/genre", "search_query": "query optimale pour Vinted"}}
+OBJECTIF: Extraire les termes clés qui définissent la valeur du modèle (Nom + Colorway iconique + SKU si présent).
 
-Regles:
-- search_query: marque + modele seulement (pas de couleur, pas de genre, pas de taille)
-- model: nom du modele sans Homme/Femme/Womens/Mens ni couleurs
-- Si collab, inclure les deux marques dans search_query
+RÈGLES STRICTES:
+1. "search_query": Doit être la chaîne de recherche Vinted la plus efficace.
+   - INCLURE: Modèle précis (ex: "Dunk Low"), Colorway SI c'est un surnom connu (ex: "Panda", "Bred", "UNC"), SKU s'il est dans le titre.
+   - EXCLURE: Mots génériques (Homme/Femme/Taille/Basket), couleurs génériques (Blanc, Noir) SAUF si c'est le nom du modèle (ex: "Triple Black").
+2. "sku": Extrait le code style (ex: DD1391-100) si présent, sinon null.
+3. "colorway": Le nom du coloris si détectable.
 
 Exemples:
-- Nike Air Force 1 Low Femme Blanc -> {{"brand": "Nike", "model": "Air Force 1 Low", "search_query": "Nike Air Force 1 Low"}}
-- New Balance 2002R Protection Pack -> {{"brand": "New Balance", "model": "2002R Protection Pack", "search_query": "New Balance 2002R"}}"""
+- "Nike Dunk Low Retro Panda White Black" -> {{"brand": "Nike", "model": "Dunk Low Retro", "colorway": "Panda", "sku": null, "search_query": "Nike Dunk Low Panda"}}
+- "Air Jordan 4 Retro Military Black DH6927-111" -> {{"brand": "Air Jordan", "model": "Jordan 4 Retro", "colorway": "Military Black", "sku": "DH6927-111", "search_query": "Jordan 4 Military Black"}}
+- "Adidas Samba OG White Green" -> {{"brand": "Adidas", "model": "Samba OG", "colorway": "White Green", "sku": null, "search_query": "Adidas Samba OG"}}
+
+OUTPUT: UNIQUEMENT le JSON minifié."""
 
         response = client.messages.create(
             model="claude-3-haiku-20240307",

@@ -2,10 +2,9 @@
 Deals Router - Consultation des deals persistés.
 Endpoints: /v1/deals/*
 """
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 from datetime import datetime, timedelta
 from typing import Optional, List
-from jose import jwt, JWTError
 
 from app.services.deal_service import (
     get_deal,
@@ -18,45 +17,10 @@ from app.services.deal_service import (
 from app.models.deal import Deal
 from app.models.deal_score import DealScore
 from app.models.vinted_stats import VintedStats
-from app.models.user import User
-from app.core.config import JWT_SECRET, JWT_ALGO
 from sqlalchemy import func, or_, and_
 from sqlalchemy.orm import joinedload
 
 router = APIRouter(prefix="/v1/deals", tags=["deals"])
-
-
-def get_user_categories_from_request(request: Request) -> List[str]:
-    """
-    Extract user categories from token if present.
-    Returns empty list for anonymous users or users without category preferences.
-    """
-    # Try cookie first, then Authorization header
-    token = request.cookies.get("access_token")
-    if not token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-
-    if not token:
-        return []
-
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
-        email = payload.get("sub")
-        if not email:
-            return []
-    except JWTError:
-        return []
-
-    # Get user categories from DB
-    with get_db_session() as session:
-        user = session.query(User).filter(User.email == email).first()
-        if user and user.preferences:
-            categories = user.preferences.get("categories", [])
-            if categories and len(categories) > 0:
-                return categories
-        return []
 
 
 def _deal_to_frontend_format(deal, score=None, vinted=None):
@@ -107,7 +71,6 @@ def _deal_to_frontend_format(deal, score=None, vinted=None):
 
 @router.get("")
 def list_all_deals(
-    request: Request,
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     source: Optional[str] = None,
@@ -124,11 +87,7 @@ def list_all_deals(
 ):
     """
     Liste tous les deals avec filtres avancés.
-    Filtre automatiquement par catégories utilisateur si connecté.
     """
-    # Get user categories (extracted before main DB session)
-    user_categories = get_user_categories_from_request(request)
-    
     with get_db_session() as session:
         # Base query with joins
         query = session.query(Deal).outerjoin(
@@ -136,17 +95,6 @@ def list_all_deals(
         ).outerjoin(
             VintedStats, Deal.id == VintedStats.deal_id
         )
-        
-        # Apply user category filter from preferences
-        # If user has categories selected, filter by those categories
-        # BUT also include deals without category (NULL) since we cannot classify them yet
-        if user_categories:
-            query = query.filter(
-                or_(
-                    Deal.category.in_(user_categories),
-                    Deal.category.is_(None)  # Include uncategorized deals
-                )
-            )
         
         # Apply filters
         if source:
@@ -390,56 +338,6 @@ def deals_stats_score_distribution():
         return distribution
 
 
-@router.get("/top/recommended")
-def get_top_recommended_deals(
-    request: Request,
-    limit: int = Query(10, ge=1, le=50),
-    category: Optional[str] = None,
-):
-    """Get top recommended deals by FlipScore."""
-    # Get user categories (extracted before main DB session)
-    user_categories = get_user_categories_from_request(request)
-    
-    with get_db_session() as session:
-        query = session.query(Deal).outerjoin(
-            DealScore, Deal.id == DealScore.deal_id
-        ).outerjoin(
-            VintedStats, Deal.id == VintedStats.deal_id
-        )
-        
-        # Apply user category filter from preferences
-        # Include uncategorized deals (NULL) as well
-        if user_categories:
-            query = query.filter(
-                or_(
-                    Deal.category.in_(user_categories),
-                    Deal.category.is_(None)
-                )
-            )
-        
-        # Only in stock and scored
-        query = query.filter(Deal.in_stock == True)
-        query = query.filter(DealScore.id != None)
-        query = query.filter(DealScore.flip_score >= 70)  # Higher threshold for "top"
-        query = query.filter(DealScore.recommended_action == "BUY")
-        
-        if category:
-            query = query.filter(Deal.category == category)
-        
-        # Order by flip_score descending
-        query = query.order_by(DealScore.flip_score.desc()).limit(limit)
-        
-        deals = query.all()
-        
-        result = []
-        for deal in deals:
-            score = session.query(DealScore).filter(DealScore.deal_id == deal.id).first()
-            vinted = session.query(VintedStats).filter(VintedStats.deal_id == deal.id).first()
-            result.append(_deal_to_frontend_format(deal, score, vinted))
-        
-        return {"deals": result}
-
-
 @router.get("/{deal_id:int}/score")
 def get_deal_score(deal_id: int):
     """Get detailed score for a specific deal."""
@@ -487,7 +385,7 @@ def list_deals_by_source(
     min_price: float = None,
     max_price: float = None,
 ):
-    """Liste les deals d une source avec filtres optionnels."""
+    """Liste les deals d'une source avec filtres optionnels."""
     deals = get_deals_by_source(
         source=source,
         limit=limit,
