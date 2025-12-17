@@ -43,7 +43,8 @@ async def score_single_deal(deal_id: int):
         vinted_data = await get_vinted_stats_for_deal(
             product_name=deal.title,
             brand=deal.brand or deal.seller_name,
-            sale_price=deal.price
+            sale_price=deal.price,
+                    sizes_available=deal.sizes_available
         )
         
         # Save Vinted stats
@@ -162,7 +163,8 @@ async def score_batch_deals(limit: int = 10, min_listings: int = 0):
                 vinted_data = await get_vinted_stats_for_deal(
                     product_name=deal.title,
                     brand=deal.brand or deal.seller_name,
-                    sale_price=deal.price
+                    sale_price=deal.price,
+                    sizes_available=deal.sizes_available
                 )
                 
                 if vinted_data.get('nb_listings', 0) < min_listings:

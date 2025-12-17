@@ -238,6 +238,24 @@ SOURCE_POLICIES: Dict[str, SourcePolicy] = {
         plan_required="premium",
         reason="Sneakersnstuff - Web Unlocker requis",
     ),
+    "laredoute": SourcePolicy(
+        mode=CollectMode.DIRECT,
+        base_interval_sec=90,
+        allow_slow=True,
+        allow_proxy=True,
+        enabled=True,
+        reason="La Redoute - accès direct possible",
+        warmup=WarmupConfig(
+            homepage="https://www.laredoute.fr/",
+            category_patterns=["/pplp/cat-831/", "/pplp/cat-830/"],
+        ),
+    ),
+    "asos": SourcePolicy(
+        mode=CollectMode.WEB_UNLOCKER,
+        enabled=True,
+        plan_required="premium",
+        reason="ASOS - Web Unlocker requis (protection Akamai)",
+    ),
     # === SOURCES BLOQUÉES ===
     "ralphlauren": SourcePolicy(
         mode=CollectMode.BLOCKED,

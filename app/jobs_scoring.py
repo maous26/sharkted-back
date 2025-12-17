@@ -412,7 +412,7 @@ def rescore_deals_batch(limit: int = 50, force: bool = False) -> Dict:
             results["processed"] += 1
             try:
                 logger.info(f"Processing deal {deal.id}: {deal.title[:50]}...")
-                stats = loop.run_until_complete(get_vinted_stats_for_deal(deal.title, deal.brand, deal.price))
+                stats = loop.run_until_complete(get_vinted_stats_for_deal(deal.title, deal.brand, deal.price, deal.sizes_available))
                 
                 if not stats or stats.get("nb_listings", 0) == 0:
                     results["no_data"] += 1

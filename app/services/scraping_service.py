@@ -146,6 +146,66 @@ SOURCE_LISTING_URLS: Dict[str, List[str]] = {
         "https://www.zalando.fr/promo-homme/",
         "https://www.zalando.fr/promo-femme/",
     ],
+    "kith": [
+        # TEXTILE en priorité
+        "https://kith.com/collections/sale?q=apparel",
+        "https://kith.com/collections/mens-sale",
+        "https://kith.com/collections/womens-sale",
+        "https://kith.com/collections/kith-apparel",
+        # Puis sneakers
+        "https://kith.com/collections/footwear",
+        "https://kith.com/collections/sale",
+    ],
+    "bstn": [
+        "https://www.bstn.com/eu_en/sale.html",
+        "https://www.bstn.com/eu_en/sneaker.html",
+        "https://www.bstn.com/eu_en/new.html",
+    ],
+    "footpatrol": [
+        "https://www.footpatrol.com/sale/",
+        "https://www.footpatrol.com/footwear/",
+        "https://www.footpatrol.com/mens/footwear/sale/",
+    ],
+    "galerieslafayette": [
+        "https://www.galerieslafayette.com/c/homme/chaussures/baskets/remise",
+        "https://www.galerieslafayette.com/c/femme/chaussures/baskets/remise",
+    ],
+    "printemps": [
+        # TEXTILE en priorité - Soldes
+        "https://www.printemps.com/fr/fr/soldes/homme/vetements?sortBy=discount_desc",
+        "https://www.printemps.com/fr/fr/soldes/femme/vetements?sortBy=discount_desc",
+        "https://www.printemps.com/fr/fr/soldes/homme/pulls-gilets-sweats?sortBy=discount_desc",
+        "https://www.printemps.com/fr/fr/soldes/femme/pulls-gilets-sweats?sortBy=discount_desc",
+        # Puis sneakers
+        "https://www.printemps.com/fr/fr/soldes/homme/chaussures/baskets--sneakers?sortBy=discount_desc",
+        "https://www.printemps.com/fr/fr/soldes/femme/chaussures/baskets--sneakers?sortBy=discount_desc",
+    ],
+    "laredoute": [
+        # TEXTILE en priorité - Soldes
+        "https://www.laredoute.fr/pplp/cat-831/aspx/promo-1.aspx",  # Vêtements homme soldes
+        "https://www.laredoute.fr/pplp/cat-830/aspx/promo-1.aspx",  # Vêtements femme soldes
+        "https://www.laredoute.fr/pplp/cat-1110/aspx/promo-1.aspx", # Pulls homme soldes
+        "https://www.laredoute.fr/pplp/cat-1109/aspx/promo-1.aspx", # Pulls femme soldes
+        # Marques premium
+        "https://www.laredoute.fr/brand-lacoste.aspx?promo=1",
+        "https://www.laredoute.fr/brand-tommy-hilfiger.aspx?promo=1",
+    ],
+    "asos": [
+        # TEXTILE en priorité - Grosses remises
+        "https://www.asos.com/fr/homme/soldes/cat/?cid=8409&sort=discount",
+        "https://www.asos.com/fr/femme/soldes/cat/?cid=7046&sort=discount",
+        "https://www.asos.com/fr/homme/pulls-cardigans/cat/?cid=7617&sale=true",
+        "https://www.asos.com/fr/femme/pulls-cardigans/cat/?cid=2637&sale=true",
+        # Marques premium
+        "https://www.asos.com/fr/homme/marque-a-a-z/north-face/cat/?cid=27424&sale=true",
+        "https://www.asos.com/fr/homme/marque-a-a-z/nike/cat/?cid=4766&sale=true",
+        "https://www.asos.com/fr/homme/marque-a-a-z/adidas-originals/cat/?cid=7113&sale=true",
+    ],
+    "sns": [
+        "https://www.sneakersnstuff.com/en/sale/sneakers",
+        "https://www.sneakersnstuff.com/en/904/sneakers",
+    ],
+
     "snipes": [
         # Soldes Snipes
         "https://www.snipes.fr/c/sale/",
@@ -180,6 +240,22 @@ PRODUCT_URL_PATTERNS: Dict[str, List[str]] = {
     "zalando": [
         r'href="(https://www\.zalando\.fr/[^"]+\.html)"',
     ],
+    "asos": [
+        r'href="(https://www\.asos\.com/fr/[^"/]+/[^"/]+/prd/\d+[^"]*)"',
+        r'href="(/fr/[^"/]+/[^"/]+/prd/\d+[^"]*)"',
+    ],
+    "laredoute": [
+        r'href="(https://www\.laredoute\.fr/ppdp/[^"]+\.aspx)"',
+        r'href="(/ppdp/[^"]+\.aspx)"',
+    ],
+    "kith": [
+        r'href="(https://kith\.com/collections/[^/]+/products/[^"]+)"',
+        r'href="(/collections/[^/]+/products/[^"]+)"',
+    ],
+    "printemps": [
+        r'href="(https://www\.printemps\.com/fr/fr/[^"]+p\d+)"',
+        r'href="(/fr/fr/[^"]+p\d+)"',
+    ],
 }
 
 # Base URLs pour construire les URLs complètes
@@ -190,6 +266,10 @@ BASE_URLS: Dict[str, str] = {
     "jdsports": "https://www.jdsports.fr",
     "adidas": "https://www.adidas.fr",
     "zalando": "https://www.zalando.fr",
+    "asos": "https://www.asos.com",
+    "laredoute": "https://www.laredoute.fr",
+    "kith": "https://kith.com",
+    "printemps": "https://www.printemps.com",
 }
 
 
@@ -492,3 +572,6 @@ def delete_old_scraping_logs(older_than_days: int) -> int:
         return 0
     finally:
         session.close()
+
+# Ajout des sources manquantes dans SOURCE_LISTING_URLS (ligne 96+)
+# À ajouter manuellement ou via sed

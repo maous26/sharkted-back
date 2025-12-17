@@ -42,6 +42,95 @@ BRAND_RESALE_DATA = {
     "diadora": {"tier": "C", "resale_multiplier": 0.80, "demand_score": 40, "avg_days_to_sell": 30},
 }
 
+
+# =============================================================================
+# MARQUES EXCLUES (distributeur, premier prix, marques propres)
+# =============================================================================
+
+EXCLUDED_BRANDS = {
+    # Marques distributeur ASOS
+    "asos", "asos design", "asos 4505", "asos edition", "asos white",
+    "collusion", "reclaimed vintage", "weekday", "monki",
+    
+    # Marques premier prix / Fast fashion
+    "primark", "kiabi", "gemo", "pimkie", "jennyfer", "cache cache",
+    "boohoo", "prettylittlething", "shein", "missguided", "nasty gal",
+    "h&m", "zara", "bershka", "pull&bear", "stradivarius",
+    "c&a", "new look", "topshop", "topman", "river island",
+    
+    # Marques distributeur La Redoute
+    "la redoute collections", "la redoute interieurs", "r essentiel",
+    "r edition", "r reference", "castaluna", "ellos",
+    
+    # Marques distributeur Printemps/GL
+    "monoprix", "galeries lafayette", "marque repere",
+    
+    # Marques generiques/inconnues
+    "no name", "sans marque", "generic", "unbranded", "unknown",
+    "marque inconnue", "autre", "other",
+    
+    # Marques sports premier prix
+    "domyos", "quechua", "kalenji", "kipsta", "newfeel", "artengo",
+    "decathlon", "tribord", "btwin", "oxelo", "orao",
+}
+
+# Marques textile premium (bonne revente)
+PREMIUM_TEXTILE_BRANDS = {
+    # Streetwear premium
+    "nike", "adidas", "jordan", "the north face", "north face", "tnf",
+    "carhartt", "carhartt wip", "stussy", "supreme", "palace",
+    "stone island", "cp company", "moncler", "canada goose",
+    
+    # Sportswear premium
+    "arc'teryx", "arcteryx", "patagonia", "salomon", "hoka",
+    
+    # Casual premium
+    "ralph lauren", "polo ralph lauren", "tommy hilfiger", "tommy jeans",
+    "lacoste", "calvin klein", "hugo boss", "boss",
+    "fred perry", "barbour", "burberry",
+    
+    # Denim premium
+    "levi's", "levis", "diesel", "g-star", "nudie jeans", "edwin",
+    
+    # Outdoor/Tech
+    "columbia", "napapijri", "timberland", "ugg",
+    
+    # Collab/Hype
+    "kith", "fear of god", "essentials", "off-white", "vetements",
+}
+
+def is_brand_excluded(brand: str) -> bool:
+    """Vérifie si une marque est exclue (distributeur, premier prix)."""
+    if not brand:
+        return True  # Pas de marque = exclure
+    
+    brand_lower = brand.lower().strip()
+    
+    # Vérifier exclusions exactes
+    if brand_lower in EXCLUDED_BRANDS:
+        return True
+    
+    # Vérifier exclusions partielles
+    for excluded in EXCLUDED_BRANDS:
+        if excluded in brand_lower or brand_lower in excluded:
+            return True
+    
+    return False
+
+def is_premium_brand(brand: str) -> bool:
+    """Vérifie si c'est une marque premium."""
+    if not brand:
+        return False
+    
+    brand_lower = brand.lower().strip()
+    
+    for premium in PREMIUM_TEXTILE_BRANDS:
+        if premium in brand_lower or brand_lower in premium:
+            return True
+    
+    return False
+
+
 # Catégories avec ajustements
 CATEGORY_CONFIG = {
     "sneakers": {"demand_multiplier": 1.15, "margin_threshold": 25},
@@ -79,17 +168,25 @@ class ScoringEngineV3:
     def _get_brand_info(self, brand: Optional[str]) -> Dict[str, Any]:
         """Récupère les infos de revente de la marque."""
         if not brand:
-            return {"tier": "C", "resale_multiplier": 0.85, "demand_score": 40, "avg_days_to_sell": 30}
+            return {"tier": "X", "resale_multiplier": 0.50, "demand_score": 10, "avg_days_to_sell": 60, "excluded": True}
         
         brand_lower = brand.lower().strip()
         
-        # Cherche correspondance exacte ou partielle
+        # VERIFICATION MARQUES EXCLUES (distributeur, premier prix)
+        if is_brand_excluded(brand):
+            return {"tier": "X", "resale_multiplier": 0.40, "demand_score": 5, "avg_days_to_sell": 90, "excluded": True}
+        
+        # Cherche correspondance exacte ou partielle dans BRAND_RESALE_DATA
         for key, data in BRAND_RESALE_DATA.items():
             if key in brand_lower or brand_lower in key:
-                return data
+                return {**data, "excluded": False}
         
-        # Marque inconnue = tier B par défaut
-        return {"tier": "B", "resale_multiplier": 0.90, "demand_score": 50, "avg_days_to_sell": 20}
+        # VERIFICATION MARQUES PREMIUM TEXTILE
+        if is_premium_brand(brand):
+            return {"tier": "A", "resale_multiplier": 1.05, "demand_score": 75, "avg_days_to_sell": 12, "excluded": False}
+        
+        # Marque inconnue mais pas exclue = tier B
+        return {"tier": "B", "resale_multiplier": 0.90, "demand_score": 50, "avg_days_to_sell": 20, "excluded": False}
     
     def _get_discount_score(self, discount_percent: float) -> float:
         """
@@ -121,8 +218,12 @@ class ScoringEngineV3:
         brand_info = self._get_brand_info(brand)
         cat_config = CATEGORY_CONFIG.get(category, CATEGORY_CONFIG["default"])
         
+        # MARQUE EXCLUE = Score très bas (bloquant)
+        if brand_info.get("excluded", False):
+            return 5  # Score minimal - deal sera filtré
+        
         # Score de base selon le tier
-        tier_scores = {"S": 95, "A": 75, "B": 50, "C": 30}
+        tier_scores = {"S": 95, "A": 75, "B": 50, "C": 30, "X": 5}
         base_score = tier_scores.get(brand_info["tier"], 40)
         
         # Ajustement selon la demande
@@ -382,6 +483,11 @@ class ScoringEngineV3:
         """Identifie les risques."""
         risks = []
         brand_info = self._get_brand_info(brand)
+        
+        # RISQUE CRITIQUE: Marque exclue
+        if brand_info.get("excluded", False):
+            risks.append("⛔ MARQUE NON RECOMMANDEE - Distributeur ou premier prix")
+            return risks  # Pas besoin d'autres risques
         
         if margin_euro < 10:
             risks.append(f"Marge estimée faible ({margin_euro:.0f}€)")

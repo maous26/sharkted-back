@@ -30,6 +30,8 @@ from app.collectors.sources.courir import fetch_courir_product
 from app.collectors.sources.footlocker import fetch_footlocker_product
 from app.collectors.sources.size import fetch_size_product
 from app.collectors.sources.jdsports import fetch_jdsports_product
+from app.collectors.sources.asos import fetch_asos_product
+from app.collectors.sources.laredoute import fetch_laredoute_product
 
 # Models
 from app.models.deal import Deal
@@ -44,10 +46,13 @@ COLLECTORS = {
     "footlocker": fetch_footlocker_product,
     "size": fetch_size_product,
     "jdsports": fetch_jdsports_product,
+    "asos": fetch_asos_product,
+    "laredoute": fetch_laredoute_product,
 }
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 MIN_SCORE = 60
+MIN_DISCOUNT = 30  # Exclure produits sans remise significative
 
 
 def persist_deal_with_autonomous_score(item, score_data: Dict, session) -> Dict:
@@ -131,7 +136,13 @@ def scrape_source(source: str, max_products: int = 50, min_score: int = MIN_SCOR
                 item = collector(url)
                 collected += 1
                 
-                # 2. Scorer avec le scoring autonome
+                # 2. Filtrer les produits sans remise
+                if not item.discount_percent or item.discount_percent < MIN_DISCOUNT:
+                    skipped_low_score += 1
+                    logger.debug(f"Skipped (no discount)", title=item.title[:30], discount=item.discount_percent)
+                    continue
+                
+                # 3. Scorer avec le scoring autonome
                 deal_data = {
                     "title": item.title,
                     "brand": item.brand or item.seller_name,
@@ -144,13 +155,13 @@ def scrape_source(source: str, max_products: int = 50, min_score: int = MIN_SCOR
                 score_result = score_deal_autonomous(deal_data)
                 flip_score = score_result.get('flip_score', 0)
                 
-                # 3. Filtrer
+                # 4. Filtrer
                 if flip_score < min_score:
                     skipped_low_score += 1
                     logger.debug(f"Skipped (score {flip_score:.1f})", title=item.title[:30])
                     continue
                 
-                # 4. Persister avec score
+                # 5. Persister avec score
                 persist_result = persist_deal_with_autonomous_score(item, score_result, session)
                 session.commit()
                 
