@@ -20,6 +20,9 @@ BASIC_SOURCES = {
     "footlocker",
     "jdsports",
     "size",
+    "footpatrol",
+    "asos",
+    "laredoute",
 }
 
 PREMIUM_SOURCES = {
@@ -27,7 +30,6 @@ PREMIUM_SOURCES = {
     "zalando",
     "printemps",
     "galerieslafayette",
-    "laredoute",
     "sns",  # Sneakersnstuff
     "bstn",
 }

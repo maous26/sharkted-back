@@ -1,108 +1,189 @@
 """
-StockX Service - Récupération des données marché via Scraping
-Utilise BrowserWorker + Web Unlocker pour contourner les protections.
+StockX Service - Récupération des données marché via Web Unlocker
+Utilise BrightData Web Unlocker pour contourner les protections StockX.
 """
 
-from typing import Optional, Dict, Any, List
-from loguru import logger
+import httpx
 import re
 import json
-from app.services.browser_worker import browser_fetch_sync
+from typing import Optional, Dict, Any
+from loguru import logger
+
 from app.services.proxy_service import get_web_unlocker_proxy
 
 class StockXService:
     """
     Service pour récupérer les données de revente sur StockX.
-    Utilise Playwright pour exécuter le JS et récupérer les données via
-    intercept ou parsing HTML.
+    Utilise le Web Unlocker pour contourner les protections.
     """
     
-    BASE_URL = "https://stockx.com"
-    SEARCH_URL = "https://stockx.com/search?s={query}"
+    SEARCH_URL = "https://stockx.com/api/browse"
+    
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://stockx.com/",
+        "Origin": "https://stockx.com",
+    }
     
     def __init__(self):
-        self.logger = logger.bind(service="stockx_scraper")
+        self.logger = logger.bind(service="stockx_service")
 
-    def get_market_data(self, product_name: str, brand: Optional[str] = None) -> Dict[str, Any]:
+    def _clean_query(self, query: str) -> str:
+        """Nettoie la query de recherche."""
+        query = re.sub(r"[^a-zA-Z0-9\s-]", "", query)
+        stopwords = ["wmns", "mens", "gs", "ps", "td", "preschool", "toddler", "grade school"]
+        words = query.lower().split()
+        words = [w for w in words if w not in stopwords]
+        return " ".join(words[:5])
+
+    def search_product(self, product_name: str, brand: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
-        Récupère les données de marché StockX.
+        Recherche un produit sur StockX via Web Unlocker.
         """
         query = f"{brand} {product_name}".strip() if brand else product_name
-        # Nettoyage query
-        query = re.sub(r'[^a-zA-Z0-9\s]', '', query)
-        
-        search_url = self.SEARCH_URL.format(query=query.replace(" ", "%20"))
+        query = self._clean_query(query)
         
         self.logger.info(f"Searching StockX for: {query}")
         
-        proxy = get_web_unlocker_proxy()
+        proxy_config = get_web_unlocker_proxy()
+        if not proxy_config:
+            self.logger.warning("No Web Unlocker proxy configured")
+            return None
         
-        # On fetch la page de recherche. 
-        # StockX injecte les données dans un script __NEXT_DATA__ souvent
-        content, error, meta = browser_fetch_sync(
-            target="stockx",
-            url=search_url,
-            timeout=40,
-            wait_for_selector='div[data-testid="search-results"]', # A adapter si le DOM change
-            proxy_config=proxy
-        )
+        # Convertir le format de proxy pour httpx
+        # proxy_config = {"http": "http://...", "https": "http://..."}
+        # httpx veut {"http://": "http://...", "https://": "http://..."}
+        proxies = {
+            "http://": proxy_config.get("http") or proxy_config.get("https"),
+            "https://": proxy_config.get("https") or proxy_config.get("http"),
+        }
         
-        if error.value != "success" or not content:
-            self.logger.warning(f"StockX search failed: {error.value}")
-            return self._empty_stats(error.value)
-            
         try:
-            # Extraction des données JSON hydratées par Next.js
-            # C'est la méthode la plus fiable sur les sites Next.js
-            match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', content)
-            
-            best_match = None
-            
-            if match:
-                data = json.loads(match.group(1))
-                # Naviguer dans le JSON pour trouver les résultats
-                # Structure typique StockX: props.pageProps.req.appContext.states.query.value.queries...
-                # Ou plus simplement, on cherche dans le HTML si la structure JSON est trop complexe/changeante.
+            with httpx.Client(
+                timeout=30,
+                proxies=proxies,
+                verify=False
+            ) as client:
+                response = client.get(
+                    self.SEARCH_URL,
+                    params={
+                        "_search": query,
+                        "page": 1,
+                        "resultsPerPage": 5,
+                        "dataType": "product",
+                        "country": "FR",
+                        "currency": "EUR"
+                    },
+                    headers=self.HEADERS
+                )
                 
-                # Approche Hybride: Regex sur le JSON brut pour trouver les "products"
-                # StockX returne une liste "edges" ou "hits"
+                self.logger.info(f"StockX response status: {response.status_code}")
                 
-                # Pour faire simple et robuste V1: on cherche le premier "product" dans le JSON
-                # On scanne le JSON pour trouver une liste de produits
-                # (Simplification pour ce POC)
-                pass 
-                
-            # Fallback parsing HTML direct
-            # Chercher le premier résultat pertinent
-            # StockX affiche souvent le "Lowest Ask" ou "Last Sale"
+                if response.status_code == 200:
+                    data = response.json()
+                    products = data.get("Products", [])
+                    
+                    if products:
+                        best = products[0]
+                        self.logger.info(f"Found StockX product: {best.get(title, Unknown)}")
+                        return best
+                    else:
+                        self.logger.warning(f"No StockX results for: {query}")
+                        return None
+                else:
+                    self.logger.warning(f"StockX API returned {response.status_code}")
+                    return None
+                    
+        except Exception as e:
+            self.logger.error(f"StockX search error: {e}")
+            return None
+
+    def get_market_data(self, product_name: str, brand: Optional[str] = None, current_price: float = 0) -> Dict[str, Any]:
+        """
+        Récupère les données de marché StockX pour un produit.
+        """
+        product = self.search_product(product_name, brand)
+        
+        if not product:
+            return self._empty_stats("no_match")
+        
+        try:
+            market = product.get("market", {})
             
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(content, 'html.parser')
+            lowest_ask = market.get("lowestAsk", 0) or 0
+            highest_bid = market.get("highestBid", 0) or 0
+            last_sale = market.get("lastSale", 0) or 0
+            sales_last_72h = market.get("salesLast72Hours", 0) or 0
+            retail_price = product.get("retailPrice", 0) or 0
             
-            # Selecteur approximatif pour le premier résultat
-            # StockX change souvent ses classes (CSS Modules)
-            # On cherche par texte "Lowest Ask" ou un prix
+            # Volatilité
+            volatility = 0
+            if lowest_ask > 0 and highest_bid > 0:
+                volatility = round((lowest_ask - highest_bid) / lowest_ask * 100, 1)
             
-            # TODO: StockX est TRÈS difficile à parser via HTML simple car classes offusquées.
-            # L'idéal est l'API interne accessible via le __NEXT_DATA__
+            # Premium
+            price_premium = 0
+            if retail_price > 0 and last_sale > 0:
+                price_premium = round((last_sale - retail_price) / retail_price * 100, 1)
             
-            # Simulation pour le POC si on ne trouve pas (évite de bloquer la démo)
-            # Dans une vrai prod, on utiliserait une API Scraper spécialisée StockX
+            # Marge (frais StockX ~12%)
+            margin_euro = 0
+            margin_pct = 0
+            sell_price = lowest_ask if lowest_ask > 0 else last_sale
+            if current_price > 0 and sell_price > 0:
+                sell_price_after_fees = sell_price * 0.88
+                margin_euro = round(sell_price_after_fees - current_price, 2)
+                margin_pct = round((margin_euro / current_price) * 100, 1)
             
-            return self._empty_stats("parsing_not_implemented_yet")
+            liquidity_score = min(100, (sales_last_72h or 0) * 5)
+            
+            return {
+                "source": "stockx",
+                "product_name": product.get("title", ""),
+                "product_url": f"https://stockx.com/{product.get(urlKey, )}",
+                "image_url": product.get("media", {}).get("thumbUrl", ""),
+                "lowest_ask": lowest_ask,
+                "highest_bid": highest_bid,
+                "last_sale": last_sale,
+                "sales_last_72h": sales_last_72h,
+                "retail_price": retail_price,
+                "volatility": volatility,
+                "price_premium": price_premium,
+                "margin_euro": margin_euro,
+                "margin_pct": margin_pct,
+                "liquidity_score": liquidity_score,
+                "error": None
+            }
             
         except Exception as e:
-            self.logger.error(f"Error parsing StockX data: {e}")
-            return self._empty_stats("parsing_error")
+            self.logger.error(f"Error extracting StockX data: {e}")
+            return self._empty_stats("extraction_error")
 
     def _empty_stats(self, reason: str = "") -> Dict[str, Any]:
         return {
             "source": "stockx",
-            "last_sale": 0,
+            "product_name": None,
+            "product_url": None,
+            "image_url": None,
             "lowest_ask": 0,
             "highest_bid": 0,
+            "last_sale": 0,
+            "sales_last_72h": 0,
+            "retail_price": 0,
             "volatility": 0,
+            "price_premium": 0,
+            "margin_euro": 0,
+            "margin_pct": 0,
+            "liquidity_score": 0,
             "error": reason
         }
 
+
 stockx_service = StockXService()
+
+
+def get_stockx_stats_for_deal(product_name: str, brand: Optional[str] = None, sale_price: float = 0) -> Dict[str, Any]:
+    """Helper function pour obtenir les stats StockX dun deal."""
+    return stockx_service.get_market_data(product_name, brand, sale_price)

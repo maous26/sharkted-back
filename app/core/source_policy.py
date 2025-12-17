@@ -104,12 +104,6 @@ class ProxyConfig:
 PROXY_CONFIG = ProxyConfig(
     provider="none",
     enabled=False,
-    # Exemples de configuration pour activation future:
-    # provider="smartproxy",
-    # endpoint="gate.smartproxy.com:7000",
-    # username="user",
-    # password="pass",
-    # country="FR",
 )
 
 
@@ -181,6 +175,7 @@ SOURCE_POLICIES: Dict[str, SourcePolicy] = {
         ),
     ),
     "kith": SourcePolicy(
+        # Utilise son propre job jobs_kith.py, pas le scraping général
         mode=CollectMode.DIRECT,
         base_interval_sec=120,
         allow_slow=True,
@@ -188,26 +183,14 @@ SOURCE_POLICIES: Dict[str, SourcePolicy] = {
         enabled=True,
         reason="Shopify JSON API - pas de protection",
     ),
-    "adidas": SourcePolicy(
-        mode=CollectMode.BLOCKED,
-        enabled=False,
-        reason="Akamai 403 - protection trop forte même avec DIRECT_SLOW",
-    ),
     # === SOURCES GRATUITES SUPPLÉMENTAIRES ===
-    "bstn": SourcePolicy(
-        mode=CollectMode.DIRECT,
-        base_interval_sec=90,
-        allow_slow=True,
-        allow_proxy=True,
-        enabled=True,
-        reason="Shopify-based - accès direct possible",
-    ),
     "footpatrol": SourcePolicy(
         mode=CollectMode.DIRECT,
         base_interval_sec=60,
         allow_slow=True,
         allow_proxy=True,
         enabled=True,
+        reason="Shopify JSON API - fonctionne bien",
         warmup=WarmupConfig(
             homepage="https://www.footpatrol.com/",
             category_patterns=["/sale/", "/mens/footwear/"],
@@ -219,24 +202,45 @@ SOURCE_POLICIES: Dict[str, SourcePolicy] = {
         enabled=False,
         reason="SPA - Playwright requis (non implémenté)",
     ),
-    # === SOURCES PREMIUM (Web Unlocker requis) ===
+    # === SOURCES SPA (désactivées - nécessitent Playwright) ===
     "galerieslafayette": SourcePolicy(
+        mode=CollectMode.BROWSER,
+        allow_browser=True,
+        enabled=False,
+        plan_required="premium",
+        reason="SPA - nécessite Playwright pour le rendu JavaScript",
+    ),
+    "asos": SourcePolicy(
         mode=CollectMode.WEB_UNLOCKER,
         enabled=True,
         plan_required="premium",
-        reason="Protection anti-bot - Web Unlocker requis",
+        reason="Web Unlocker requis",
+    ),
+    "laredoute": SourcePolicy(
+        mode=CollectMode.WEB_UNLOCKER,
+        enabled=True,
+        plan_required="premium",
+        reason="Web Unlocker requis",
     ),
     "printemps": SourcePolicy(
-        mode=CollectMode.WEB_UNLOCKER,
+        mode=CollectMode.BROWSER,
+        allow_browser=True,
         enabled=True,
         plan_required="premium",
-        reason="Protection anti-bot - Web Unlocker requis",
+        reason="SPA - nécessite Playwright pour le rendu JavaScript",
     ),
     "sns": SourcePolicy(
-        mode=CollectMode.WEB_UNLOCKER,
-        enabled=True,
+        mode=CollectMode.BROWSER,
+        allow_browser=True,
+        enabled=False,
         plan_required="premium",
-        reason="Sneakersnstuff - Web Unlocker requis",
+        reason="SPA - nécessite Playwright pour le rendu JavaScript",
+    ),
+    "bstn": SourcePolicy(
+        mode=CollectMode.BROWSER,
+        allow_browser=True,
+        enabled=False,
+        reason="SPA - nécessite Playwright pour le rendu JavaScript",
     ),
     # === SOURCES BLOQUÉES ===
     "ralphlauren": SourcePolicy(
@@ -298,8 +302,6 @@ class WarmupSession:
 
     def _accept_cookies(self, html: str) -> None:
         """Détecte et simule l'acceptation des cookies (basique)."""
-        # Pour l'instant, on ne fait rien de spécial
-        # Les cookies sont gérés automatiquement par cloudscraper
         self._cookies_accepted = True
 
     def warmup(self) -> bool:
@@ -338,7 +340,6 @@ class WarmupSession:
                     resp = self.scraper.get(cat_url, timeout=20)
 
                     if resp.status_code == 403:
-                        # Pas grave si category échoue, on continue
                         logger.debug(f"Warmup: category blocked, continuing", source=self.source)
 
                     self._random_delay()
@@ -403,9 +404,8 @@ class OutcomeTracker:
     Thread-safe, stockage en mémoire (suffisant pour MVP).
     """
 
-    # Seuils d'escalade
     FAILURES_BEFORE_ESCALATE = 3
-    BLOCK_DURATION_MIN = 30  # minutes
+    BLOCK_DURATION_MIN = 30
 
     def __init__(self):
         self._metrics: Dict[str, SourceMetrics] = {}
@@ -440,7 +440,6 @@ class OutcomeTracker:
                 m.success_24h += 1
                 m.last_success_at = datetime.utcnow()
                 m.consecutive_failures = 0
-                # Débloquer si succès
                 if m.blocked_until:
                     m.blocked_until = None
                     logger.info(f"Source unblocked after success", source=source)
@@ -462,25 +461,16 @@ class OutcomeTracker:
             )
 
     def should_escalate(self, source: str, error_type: Optional[str] = None) -> Optional[CollectMode]:
-        """
-        Détermine si on doit escalader vers un mode supérieur.
-
-        Ordre d'escalade: DIRECT → DIRECT_SLOW → PROXY → BROWSER → BLOCKED
-
-        Returns:
-            Le nouveau mode si escalade nécessaire, None sinon.
-        """
+        """Détermine si on doit escalader vers un mode supérieur."""
         with self._lock:
             m = self._get_or_create(source)
             policy = get_policy(source)
 
-            # Pas assez d'échecs pour escalader
             if m.consecutive_failures < self.FAILURES_BEFORE_ESCALATE:
                 return None
 
             current = m.current_mode
 
-            # DIRECT -> DIRECT_SLOW si autorisé
             if current == CollectMode.DIRECT and policy.allow_slow:
                 logger.warning(
                     f"Escalating to DIRECT_SLOW",
@@ -491,7 +481,6 @@ class OutcomeTracker:
                 m.consecutive_failures = 0
                 return CollectMode.DIRECT_SLOW
 
-            # DIRECT_SLOW -> PROXY si autorisé
             if current == CollectMode.DIRECT_SLOW and policy.allow_proxy:
                 logger.warning(
                     f"Escalating to PROXY",
@@ -502,7 +491,6 @@ class OutcomeTracker:
                 m.consecutive_failures = 0
                 return CollectMode.PROXY
 
-            # PROXY -> BROWSER si autorisé et erreur SPA
             if current == CollectMode.PROXY and policy.allow_browser:
                 if error_type in ("DataExtractionError", "SPADetected"):
                     logger.warning(
@@ -514,7 +502,6 @@ class OutcomeTracker:
                     m.consecutive_failures = 0
                     return CollectMode.BROWSER
 
-            # Sinon -> BLOCKED après beaucoup d'échecs
             if m.consecutive_failures >= self.FAILURES_BEFORE_ESCALATE * 2:
                 logger.error(
                     f"Source blocked due to repeated failures",
@@ -543,7 +530,6 @@ class OutcomeTracker:
     def get_all_metrics(self) -> Dict[str, SourceMetrics]:
         """Retourne les métriques de toutes les sources."""
         with self._lock:
-            # Ajouter les sources configurées mais jamais utilisées
             for source in SOURCE_POLICIES:
                 self._get_or_create(source)
             return dict(self._metrics)
@@ -556,7 +542,6 @@ class OutcomeTracker:
             m.blocked_until = None
             m.consecutive_failures = 0
 
-            # Reset au mode par défaut de la policy
             policy = get_policy(source)
             m.current_mode = policy.mode if policy.enabled else CollectMode.BLOCKED
 
@@ -619,29 +604,17 @@ def unblock_source(source: str) -> bool:
 # =============================================================================
 
 def pick_queue(user: Optional[dict], kind: str = "collect") -> str:
-    """
-    Choisit la queue appropriée selon l'utilisateur et le type de job.
-
-    Args:
-        user: Dict avec au minimum {"is_premium": bool} ou None
-        kind: Type de job ("collect", "refresh", "batch", "alert")
-
-    Returns:
-        Nom de la queue: "high", "default", ou "low"
-    """
+    """Choisit la queue appropriée selon l'utilisateur et le type de job."""
     is_premium = user.get("is_premium", False) if user else False
 
-    # Alertes urgentes -> toujours high
     if kind == "alert":
         return "high"
 
-    # Premium users
     if is_premium:
         if kind in ("collect", "refresh"):
             return "high"
         return "default"
 
-    # Non-premium
     if kind == "batch":
         return "low"
 
@@ -663,16 +636,7 @@ def is_proxy_enabled() -> bool:
 
 
 def get_proxies_for_requests() -> Optional[Dict[str, str]]:
-    """
-    Retourne les proxies au format requests/cloudscraper.
-
-    Usage dans un collector:
-        proxies = get_proxies_for_requests()
-        if proxies:
-            resp = scraper.get(url, proxies=proxies)
-        else:
-            resp = scraper.get(url)
-    """
+    """Retourne les proxies au format requests/cloudscraper."""
     return PROXY_CONFIG.to_requests_format()
 
 
@@ -683,12 +647,7 @@ def enable_proxy(
     password: str,
     country: str = "FR",
 ) -> None:
-    """
-    Active les proxies avec la configuration fournie.
-
-    ATTENTION: Cette fonction modifie la config globale.
-    À utiliser uniquement pour des tests ou via un endpoint admin.
-    """
+    """Active les proxies avec la configuration fournie."""
     global PROXY_CONFIG
     PROXY_CONFIG = ProxyConfig(
         provider=provider,

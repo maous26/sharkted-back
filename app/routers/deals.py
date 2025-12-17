@@ -18,6 +18,7 @@ from app.services.deal_service import (
 from app.models.deal import Deal
 from app.models.deal_score import DealScore
 from app.models.vinted_stats import VintedStats
+from app.models.stockx_stats import StockXStats
 from app.models.user import User
 from app.models.subscription import get_user_tier, get_tier_limits, get_tier_sources, SubscriptionTier
 from app.core.config import JWT_SECRET, JWT_ALGO

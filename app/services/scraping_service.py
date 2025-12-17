@@ -142,9 +142,60 @@ SOURCE_LISTING_URLS: Dict[str, List[str]] = {
         "https://www.adidas.fr/femmes-chaussures-outlet",
     ],
     "zalando": [
-        # Nécessite proxy résidentiel - désactivé pour l'instant
-        "https://www.zalando.fr/promo-homme/",
-        "https://www.zalando.fr/promo-femme/",
+    ],
+    "footpatrol": [
+        r'href="(https://www.footpatrol.com/products/[^"]+)"',
+        r'href="(/products/[^"]+)"',
+    ],
+    "kith": [
+        r'href="(https://kith.com/products/[^"]+)"',
+        r'href="(/products/[^"]+)"',
+    ],
+    "sns": [
+        r'href="(https://www.sneakersnstuff.com/[^"]+/product/[^"]+)"',
+        r'href="(/[^/]+/product/[^"]+)"',
+        r'data-product-url="([^"]+)"',
+    ],
+    "galerieslafayette": [
+        r'href="(https://www.galerieslafayette.com/p/[^"]+)"',
+        r'href="(/p/[^"]+)"',
+    ],
+    "printemps": [
+        r'href="(https://www.printemps.com/[^"]+/p/[^"]+)"',
+        r'href="(https://www.printemps.com/fr/fr/[^/]+-[0-9]+)"',
+    ],
+    "footpatrol": [
+        # Shopify store - use JSON API directly
+        "https://www.footpatrol.com/collections/sale/",
+        "https://www.footpatrol.com/collections/mens-footwear-trainers-sale/",
+    ],
+    "kith": [
+        r'href="(https://kith.com/products/[^"]+)"',
+        r'href="(/products/[^"]+)"',
+    ],
+    "sns": [
+        r'href="(https://www.sneakersnstuff.com/[^"]+/product/[^"]+)"',
+        r'href="(/[^/]+/product/[^"]+)"',
+        r'data-product-url="([^"]+)"',
+    ],
+    "galerieslafayette": [
+        r'href="(https://www.galerieslafayette.com/p/[^"]+)"',
+        r'href="(/p/[^"]+)"',
+    ],
+    "printemps": [
+        r'href="(https://www.printemps.com/[^"]+/p/[^"]+)"',
+        r'href="(https://www.printemps.com/fr/fr/[^/]+-[0-9]+)"',
+    ],
+    "sns": [
+        "https://www.sneakersnstuff.com/en/sale",
+        "https://www.sneakersnstuff.com/en/product/sneakers",
+    ],
+    "galerieslafayette": [
+        "https://www.galerieslafayette.com/c/homme/chaussures/sneakers+baskets/offres+promos",
+        "https://www.galerieslafayette.com/c/homme/chaussures/sneakers+baskets",
+    ],
+    "printemps": [
+        "https://www.printemps.com/fr/fr/homme/chaussures/sneakers",
     ],
     "snipes": [
         # Soldes Snipes
@@ -178,7 +229,27 @@ PRODUCT_URL_PATTERNS: Dict[str, List[str]] = {
         r'data-auto-id="product-card-title" href="([^"]+)"',
     ],
     "zalando": [
-        r'href="(https://www\.zalando\.fr/[^"]+\.html)"',
+    ],
+    "footpatrol": [
+        r'href="(https://www.footpatrol.com/products/[^"]+)"',
+        r'href="(/products/[^"]+)"',
+    ],
+    "kith": [
+        r'href="(https://kith.com/products/[^"]+)"',
+        r'href="(/products/[^"]+)"',
+    ],
+    "sns": [
+        r'href="(https://www.sneakersnstuff.com/[^"]+/product/[^"]+)"',
+        r'href="(/[^/]+/product/[^"]+)"',
+        r'data-product-url="([^"]+)"',
+    ],
+    "galerieslafayette": [
+        r'href="(https://www.galerieslafayette.com/p/[^"]+)"',
+        r'href="(/p/[^"]+)"',
+    ],
+    "printemps": [
+        r'href="(https://www.printemps.com/[^"]+/p/[^"]+)"',
+        r'href="(https://www.printemps.com/fr/fr/[^/]+-[0-9]+)"',
     ],
 }
 
@@ -190,8 +261,31 @@ BASE_URLS: Dict[str, str] = {
     "jdsports": "https://www.jdsports.fr",
     "adidas": "https://www.adidas.fr",
     "zalando": "https://www.zalando.fr",
+    "footpatrol": "https://www.footpatrol.com",
+    "kith": "https://kith.com",
+    "sns": "https://www.sneakersnstuff.com",
+    "galerieslafayette": "https://www.galerieslafayette.com",
+    "printemps": "https://www.printemps.com",
 }
 
+
+# Découverte spéciale pour les sources Shopify (API JSON)
+SHOPIFY_SOURCES = {
+    "footpatrol": "app.collectors.sources.footpatrol:discover_footpatrol_products",
+    "kith": "app.collectors.sources.kith:discover_kith_products",
+    "asos": "app.collectors.sources.asos:discover_asos_products",
+    "laredoute": "app.collectors.sources.laredoute:discover_laredoute_products",
+}
+
+def get_shopify_discovery_function(source: str):
+    """Retourne la fonction de découverte Shopify si disponible."""
+    if source not in SHOPIFY_SOURCES:
+        return None
+    
+    module_path, func_name = SHOPIFY_SOURCES[source].rsplit(":", 1)
+    from importlib import import_module
+    module = import_module(module_path)
+    return getattr(module, func_name)
 
 # =============================================================================
 # CORE FUNCTIONS
@@ -291,6 +385,26 @@ def discover_products(source: str) -> tuple:
                     source=source,
                 )
                 return result, set()
+    
+    # Pour les sources Shopify, utiliser la découverte API JSON
+    shopify_discover = get_shopify_discovery_function(source)
+    if shopify_discover:
+        try:
+            product_urls = shopify_discover(limit=50)
+            result.products_found = len(product_urls)
+            result.status = "success" if product_urls else "empty"
+            result.method_used = "shopify_api"
+            result.completed_at = datetime.utcnow()
+            result.duration_seconds = (result.completed_at - result.started_at).total_seconds()
+            logger.info(
+                f"Shopify discovery completed",
+                source=source,
+                products_found=len(product_urls),
+            )
+            return result, set(product_urls)
+        except Exception as e:
+            logger.warning(f"Shopify discovery failed: {e}", source=source)
+            result.errors.append(f"Shopify API error: {str(e)}")
     
     # Obtenir les URLs de listing
     listing_urls = SOURCE_LISTING_URLS.get(source, [])

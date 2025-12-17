@@ -334,6 +334,45 @@ TARGET_CONFIGS: Dict[str, TargetConfig] = {
         enabled=False,  # Désactivé Phase 1
         disabled_reason="Requires residential proxies (Akamai protection)",
     ),
+    # =========================================================================
+    # SOURCES SPA - Nécessitent Playwright
+    # =========================================================================
+    "sns": TargetConfig(
+        slug="sns",
+        name="Sneakersnstuff",
+        base_url="https://www.sneakersnstuff.com",
+        protection=TargetProtection.CUSTOM,
+        allowed_methods=[
+            ScrapingMethod.BROWSER_RESIDENTIAL,
+        ],
+        requires_residential=False,
+        requests_per_second=0.5,
+        enabled=False,
+    ),
+    "galerieslafayette": TargetConfig(
+        slug="galerieslafayette",
+        name="Galeries Lafayette",
+        base_url="https://www.galerieslafayette.com",
+        protection=TargetProtection.CUSTOM,
+        allowed_methods=[
+            ScrapingMethod.BROWSER_RESIDENTIAL,
+        ],
+        requires_residential=False,
+        requests_per_second=0.5,
+        enabled=False,
+    ),
+    "printemps": TargetConfig(
+        slug="printemps",
+        name="Printemps",
+        base_url="https://www.printemps.com",
+        protection=TargetProtection.CUSTOM,
+        allowed_methods=[
+            ScrapingMethod.BROWSER_RESIDENTIAL,
+        ],
+        requires_residential=False,
+        requests_per_second=0.5,
+        enabled=True,
+    ),
 }
 
 
@@ -722,11 +761,51 @@ class ScrapingOrchestrator:
             method = config.allowed_methods[0] if config.allowed_methods else ScrapingMethod.HTTP_DIRECT
         
         # Exécuter selon méthode
-        if method == ScrapingMethod.BROWSER_RESIDENTIAL:
-            return None, ErrorType.BLOCKED, {"reason": "Browser method not implemented yet"}
+        if method == ScrapingMethod.BROWSER_RESIDENTIAL or method.value == "browser":
+            return self._fetch_browser(target, url, timeout, config)
         
         return self._fetch_http(target, url, method, timeout, config)
     
+
+    def _fetch_browser(
+        self,
+        target: str,
+        url: str,
+        timeout: int,
+        config: "TargetConfig",
+    ) -> Tuple[Optional[str], ErrorType, Dict]:
+        """Fetch avec Playwright pour les sites SPA/JS."""
+        from app.services.browser_worker import browser_fetch_sync
+        
+        # Sélecteurs CSS pour attendre le contenu selon le site
+        wait_selectors = {
+            "sns": ".product-card, .product-tile, [data-product]",
+            "galerieslafayette": ".product-card, .product-tile, [data-product-id]",
+            "printemps": ".product-card, .product-tile, [data-product]",
+        }
+        wait_for = wait_selectors.get(target)
+        
+        content, error_type, metadata = browser_fetch_sync(
+            target=target,
+            url=url,
+            timeout=timeout,
+            wait_for_selector=wait_for,
+        )
+        
+        # Enregistrer les métriques
+        self.engine.record_result(
+            target=target,
+            method=ScrapingMethod.BROWSER_RESIDENTIAL,
+            url=url,
+            duration_ms=metadata.get("duration_ms", 0),
+            status_code=metadata.get("status_code"),
+            error_type=error_type,
+            response_size=metadata.get("response_size", 0),
+            proxy_used=metadata.get("proxy_used", False),
+        )
+        
+        return content, error_type, metadata
+
     def _fetch_http(
         self,
         target: str,

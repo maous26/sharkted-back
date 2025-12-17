@@ -508,3 +508,72 @@ def rescore_deals_batch(limit: int = 50, force: bool = False) -> Dict:
     
     logger.info(f"Rescraping complete: scored={results['scored']}, no_data={results['no_data']}, errors={results['errors']}")
     return results
+
+
+def score_single_deal_with_vinted(deal_id: int) -> Dict:
+    """
+    Score un deal unique avec Vinted (appelé via RQ pour les deals qualifiés).
+    """
+    import asyncio
+    from app.db.session import SessionLocal
+    from app.models.deal import Deal
+    from app.models.vinted_stats import VintedStats
+    from app.models.deal_score import DealScore
+    from app.services.vinted_service import get_vinted_stats_for_deal
+    
+    logger.info(f"Starting Vinted scoring for deal {deal_id}")
+    
+    db = SessionLocal()
+    try:
+        deal = db.query(Deal).filter(Deal.id == deal_id).first()
+        if not deal:
+            return {"deal_id": deal_id, "status": "not_found"}
+        
+        # Récupérer les stats Vinted
+        try:
+            stats = asyncio.run(get_vinted_stats_for_deal(deal.title, deal.brand, deal.price))
+        except Exception as e:
+            logger.warning(f"Vinted scrape error for deal {deal_id}: {e}")
+            stats = None
+        
+        if not stats or stats.get("nb_listings", 0) == 0:
+            # Créer un enregistrement vide pour marquer comme traité
+            vinted_stat = db.query(VintedStats).filter(VintedStats.deal_id == deal_id).first()
+            if not vinted_stat:
+                vinted_stat = VintedStats(deal_id=deal_id, nb_listings=0)
+                db.add(vinted_stat)
+                db.commit()
+            return {"deal_id": deal_id, "status": "no_listings", "nb_listings": 0}
+        
+        # Sauvegarder les stats Vinted
+        vinted_stat = db.query(VintedStats).filter(VintedStats.deal_id == deal_id).first()
+        if not vinted_stat:
+            vinted_stat = VintedStats(deal_id=deal_id)
+            db.add(vinted_stat)
+        
+        vinted_stat.nb_listings = stats.get("nb_listings", 0)
+        vinted_stat.price_min = stats.get("price_min")
+        vinted_stat.price_max = stats.get("price_max")
+        vinted_stat.price_median = stats.get("price_median")
+        vinted_stat.margin_pct = stats.get("margin_pct")
+        vinted_stat.margin_euro = stats.get("margin_euro")
+        vinted_stat.liquidity_score = stats.get("liquidity_score")
+        
+        db.commit()
+        
+        logger.info(f"Vinted scoring completed for deal {deal_id}: {stats.get('nb_listings')} listings, margin: {stats.get('margin_pct')}%")
+        
+        return {
+            "deal_id": deal_id,
+            "status": "scored",
+            "nb_listings": stats.get("nb_listings", 0),
+            "margin_pct": stats.get("margin_pct", 0),
+            "price_median": stats.get("price_median", 0),
+        }
+        
+    except Exception as e:
+        logger.error(f"Error scoring deal {deal_id} with Vinted: {e}")
+        db.rollback()
+        return {"deal_id": deal_id, "status": "error", "error": str(e)}
+    finally:
+        db.close()

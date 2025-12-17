@@ -1,6 +1,5 @@
 """
-Scheduler - Jobs planifiés avec scoring autonome.
-Plus besoin de batch Vinted - tout est scoré immédiatement.
+Scheduler - Jobs planifiés avec scoring autonome + StockX via Web Unlocker.
 """
 import os
 from datetime import datetime, timedelta, timezone
@@ -59,7 +58,20 @@ def setup_scheduled_jobs():
     )
     logger.info("Scheduled: cleanup logs every 24h")
     
-    logger.info("All jobs configured (autonomous scoring mode)")
+    # 4. Scoring des nouveaux deals (avec Vinted Sniper) - toutes les 10 min
+    from app.jobs_scoring import score_new_deals
+    scheduler.schedule(
+        scheduled_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        func=score_new_deals,
+        kwargs={"limit": 20},
+        interval=600,  # 10 min
+        repeat=None,
+        result_ttl=3600,
+        queue_name="default",
+    )
+    logger.info("Scheduled: Vinted scoring (new deals) every 10 min")
+    
+    logger.info("All jobs configured (Scraping + Vinted Scoring)")
     return scheduler
 
 

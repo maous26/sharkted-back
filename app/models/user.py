@@ -14,6 +14,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     plan: Mapped[str] = mapped_column(String(20), default="free", nullable=True)
     preferences: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, default=None)
+    subscription_status: Mapped[str] = mapped_column(String(20), default="active", nullable=True)
 
     @property
     def is_admin(self) -> bool:

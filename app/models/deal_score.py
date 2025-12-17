@@ -38,6 +38,13 @@ class DealScore(Base):
     # Prédictions
     estimated_sell_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     
+    # Données Vinted
+    vinted_median_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    vinted_avg_days_to_sell: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    vinted_total_sold: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    vinted_total_listings: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    vinted_searched_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    
     # Métadonnées du modèle
     model_version: Mapped[str] = mapped_column(String(50), default="rules_v1")
     

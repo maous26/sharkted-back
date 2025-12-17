@@ -30,6 +30,14 @@ from app.collectors.sources.courir import fetch_courir_product
 from app.collectors.sources.footlocker import fetch_footlocker_product
 from app.collectors.sources.size import fetch_size_product
 from app.collectors.sources.jdsports import fetch_jdsports_product
+from app.collectors.sources.bstn import fetch_bstn_product
+from app.collectors.sources.footpatrol import fetch_footpatrol_product
+from app.collectors.sources.sns import fetch_sns_product
+from app.collectors.sources.galerieslafayette import fetch_galerieslafayette_product
+from app.collectors.sources.printemps import fetch_printemps_product
+from app.collectors.sources.kith import fetch_kith_product
+from app.collectors.sources.asos import fetch_asos_product
+from app.collectors.sources.laredoute import fetch_laredoute_product
 
 # Models
 from app.models.deal import Deal
@@ -44,6 +52,14 @@ COLLECTORS = {
     "footlocker": fetch_footlocker_product,
     "size": fetch_size_product,
     "jdsports": fetch_jdsports_product,
+    "bstn": fetch_bstn_product,
+    "footpatrol": fetch_footpatrol_product,
+    "sns": fetch_sns_product,
+    "galerieslafayette": fetch_galerieslafayette_product,
+    "printemps": fetch_printemps_product,
+    "kith": fetch_kith_product,
+    "asos": fetch_asos_product,
+    "laredoute": fetch_laredoute_product,
 }
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -157,6 +173,19 @@ def scrape_source(source: str, max_products: int = 50, min_score: int = MIN_SCOR
                 if persist_result.get("action") == "created":
                     new_deals += 1
                     logger.info(f"NEW: {item.title[:40]} | Score: {flip_score:.1f}", source=source)
+                    
+                    # Enqueue Vinted scoring pour les deals qualifiés (>= 65)
+                    if flip_score >= 65:
+                        try:
+                            deal_id = persist_result.get("deal_id")
+                            if deal_id:
+                                redis_conn = redis.from_url(REDIS_URL)
+                                q = Queue("default", connection=redis_conn)
+                                from app.jobs_scoring import score_single_deal_with_vinted
+                                q.enqueue(score_single_deal_with_vinted, deal_id, job_timeout=120)
+                                logger.info(f"Enqueued Vinted scoring for deal {deal_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to enqueue Vinted scoring: {e}")
                 else:
                     updated_deals += 1
                 
