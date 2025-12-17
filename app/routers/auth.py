@@ -8,6 +8,12 @@ from app.db.deps import get_db
 from app.models.user import User
 from app.core.security import hash_password, verify_password, create_access_token
 from app.core.rate_limiter import rate_limit_login, rate_limit_register
+from app.core.subscription_tiers import (
+    get_tier_from_plan,
+    get_tier_limits,
+    get_allowed_sources,
+    get_tier_info,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -30,9 +36,7 @@ class LoginIn(BaseModel):
 @router.post("/register")
 def register(payload: RegisterIn, request: Request, db: Session = Depends(get_db)):
     """Register a new user."""
-    # Rate limit: 3/min per IP
     rate_limit_register(request)
-
     email = payload.email.strip().lower()
 
     if db.query(User).filter(User.email == email).first():
@@ -52,18 +56,8 @@ def login(
     db: Session = Depends(get_db),
     use_cookie: bool = True,
 ):
-    """
-    Login and get access token.
-
-    Returns token in both:
-    - Response body (for API clients using Bearer auth)
-    - HttpOnly cookie (for web browsers - more secure)
-
-    Set use_cookie=false to skip cookie (API clients only).
-    """
-    # Rate limit: 5/min per IP (brute force protection)
+    """Login and get access token."""
     rate_limit_login(request)
-
     email = payload.email.strip().lower()
 
     user = db.query(User).filter(User.email == email).first()
@@ -72,19 +66,19 @@ def login(
 
     token = create_access_token(subject=user.email)
 
-    # Set HttpOnly cookie for web browsers
     if use_cookie:
         response.set_cookie(
             key=COOKIE_NAME,
             value=token,
             max_age=COOKIE_MAX_AGE,
-            httponly=True,  # Not accessible via JavaScript (XSS protection)
-            secure=IS_PRODUCTION,  # HTTPS only in production
-            samesite="lax",  # CSRF protection
+            httponly=True,
+            secure=IS_PRODUCTION,
+            samesite="lax",
         )
 
-    # Build user info for frontend
     plan = user.plan or "free"
+    tier = get_tier_from_plan(plan)
+    limits = get_tier_limits(tier)
     is_admin = user.email == "admin@sharkted.fr" or plan == "owner"
 
     return {
@@ -94,7 +88,16 @@ def login(
             "id": user.id,
             "email": user.email,
             "plan": plan.upper(),
+            "tier": tier.value,
             "is_admin": is_admin,
+            "limits": {
+                "max_deals": limits.max_deals,
+                "vinted_scoring": limits.vinted_scoring,
+                "premium_sources": limits.premium_sources,
+                "alerts_enabled": limits.alerts_enabled,
+                "favorites_enabled": limits.favorites_enabled,
+                "export_enabled": limits.export_enabled,
+            },
         }
     }
 
@@ -116,7 +119,6 @@ def get_current_user_from_request(request: Request, db: Session) -> User:
     from jose import jwt, JWTError
     from app.core.config import JWT_SECRET, JWT_ALGO
 
-    # Try cookie first, then Authorization header
     token = request.cookies.get("access_token")
     if not token:
         auth_header = request.headers.get("Authorization", "")
@@ -143,18 +145,29 @@ def get_current_user_from_request(request: Request, db: Session) -> User:
 
 @router.get("/me")
 def get_me(request: Request, db: Session = Depends(get_db)):
-    """Get current authenticated user info."""
+    """Get current authenticated user info with tier details."""
     user = get_current_user_from_request(request, db)
 
-    # Determine effective plan (owner has admin access)
     plan = user.plan or "free"
+    tier = get_tier_from_plan(plan)
+    limits = get_tier_limits(tier)
     is_admin = user.email == "admin@sharkted.fr" or plan == "owner"
 
     return {
         "id": user.id,
         "email": user.email,
         "plan": plan.upper() if plan else "FREE",
+        "tier": tier.value,
         "is_admin": is_admin,
+        "limits": {
+            "max_deals": limits.max_deals,
+            "vinted_scoring": limits.vinted_scoring,
+            "premium_sources": limits.premium_sources,
+            "alerts_enabled": limits.alerts_enabled,
+            "favorites_enabled": limits.favorites_enabled,
+            "export_enabled": limits.export_enabled,
+        },
+        "allowed_sources": list(get_allowed_sources(tier)),
     }
 
 
@@ -162,7 +175,7 @@ def get_me(request: Request, db: Session = Depends(get_db)):
 # ADMIN ENDPOINTS - User Management (owner only)
 # =============================================================================
 
-VALID_PLANS = ["free", "pro", "agency", "owner"]
+VALID_PLANS = ["free", "basic", "premium", "pro", "agency", "owner"]
 
 
 @router.get("/admin/users")
@@ -170,7 +183,6 @@ def list_users(request: Request, db: Session = Depends(get_db)):
     """List all users (owner only)."""
     current_user = get_current_user_from_request(request, db)
 
-    # Only owner can access
     if current_user.email != "admin@sharkted.fr" and current_user.plan != "owner":
         raise HTTPException(status_code=403, detail="Admin access required")
 
@@ -180,6 +192,7 @@ def list_users(request: Request, db: Session = Depends(get_db)):
             "id": u.id,
             "email": u.email,
             "plan": (u.plan or "free").upper(),
+            "tier": get_tier_from_plan(u.plan).value,
             "is_owner": u.email == "admin@sharkted.fr" or u.plan == "owner",
         }
         for u in users
@@ -200,11 +213,9 @@ def update_user_plan(
     """Update a user's plan (owner only)."""
     current_user = get_current_user_from_request(request, db)
 
-    # Only owner can access
     if current_user.email != "admin@sharkted.fr" and current_user.plan != "owner":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    # Validate plan
     plan = payload.plan.lower()
     if plan not in VALID_PLANS:
         raise HTTPException(
@@ -212,23 +223,23 @@ def update_user_plan(
             detail=f"Invalid plan. Must be one of: {', '.join(VALID_PLANS)}"
         )
 
-    # Find user
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Cannot change owner's own plan
     if user.email == "admin@sharkted.fr":
         raise HTTPException(status_code=400, detail="Cannot modify owner account")
 
     user.plan = plan
     db.commit()
 
+    tier = get_tier_from_plan(plan)
     return {
         "id": user.id,
         "email": user.email,
         "plan": plan.upper(),
-        "message": f"Plan updated to {plan.upper()}",
+        "tier": tier.value,
+        "message": f"Plan updated to {plan.upper()} (tier: {tier.value})",
     }
 
 
@@ -241,16 +252,13 @@ def delete_user(
     """Delete a user (owner only)."""
     current_user = get_current_user_from_request(request, db)
 
-    # Only owner can access
     if current_user.email != "admin@sharkted.fr" and current_user.plan != "owner":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    # Find user
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Cannot delete owner
     if user.email == "admin@sharkted.fr":
         raise HTTPException(status_code=400, detail="Cannot delete owner account")
 
@@ -261,36 +269,24 @@ def delete_user(
 
 
 # =============================================================================
-# USER PREFERENCES - Category preferences for scraping/alerts
+# USER PREFERENCES
 # =============================================================================
 
-# Available product categories
 PRODUCT_CATEGORIES = [
-    "sneakers",
-    "sacs",
-    "doudounes",
-    "vestes",
-    "t-shirts",
-    "sweats",
-    "pantalons",
-    "robes",
-    "accessoires",
-    "montres",
-    "lunettes",
-    "chaussures",
+    "sneakers", "sacs", "doudounes", "vestes", "t-shirts", "sweats",
+    "pantalons", "robes", "accessoires", "montres", "lunettes", "chaussures",
 ]
 
 
 class UpdatePreferences(BaseModel):
     categories: Optional[List[str]] = None
-    other_categories: Optional[str] = None  # Free text for custom categories
+    other_categories: Optional[str] = None
 
 
 @router.get("/me/preferences")
 def get_preferences(request: Request, db: Session = Depends(get_db)):
     """Get current user's category preferences."""
     user = get_current_user_from_request(request, db)
-
     preferences = user.preferences or {}
 
     return {
@@ -308,26 +304,20 @@ def update_preferences(
 ):
     """Update current user's category preferences."""
     user = get_current_user_from_request(request, db)
-
-    # Get existing preferences or create new dict
     preferences = user.preferences or {}
 
-    # Update categories if provided
     if payload.categories is not None:
-        # Validate categories
         invalid = [c for c in payload.categories if c not in PRODUCT_CATEGORIES and c != "autre"]
         if invalid:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid categories: {', '.join(invalid)}. Valid: {', '.join(PRODUCT_CATEGORIES)}"
+                detail=f"Invalid categories: {', '.join(invalid)}"
             )
         preferences["categories"] = payload.categories
 
-    # Update other_categories text if provided
     if payload.other_categories is not None:
         preferences["other_categories"] = payload.other_categories.strip()
 
-    # Save to database
     user.preferences = preferences
     db.commit()
 
@@ -341,7 +331,32 @@ def update_preferences(
 @router.get("/categories")
 def get_available_categories():
     """Get list of available product categories."""
-    return {
-        "categories": PRODUCT_CATEGORIES,
-    }
+    return {"categories": PRODUCT_CATEGORIES}
 
+
+@router.get("/subscription/tiers")
+def get_subscription_tiers():
+    """Get all subscription tiers and their features."""
+    from app.core.subscription_tiers import SubscriptionTier, TIER_LIMITS, FREE_SOURCES, PREMIUM_SOURCES
+    
+    tiers = []
+    for tier in SubscriptionTier:
+        limits = TIER_LIMITS[tier]
+        tiers.append({
+            "tier": tier.value,
+            "limits": {
+                "max_deals": limits.max_deals,
+                "max_top_deals": limits.max_top_deals,
+                "vinted_scoring": limits.vinted_scoring,
+                "premium_sources": limits.premium_sources,
+                "alerts_enabled": limits.alerts_enabled,
+                "favorites_enabled": limits.favorites_enabled,
+                "export_enabled": limits.export_enabled,
+            },
+        })
+    
+    return {
+        "tiers": tiers,
+        "free_sources": list(FREE_SOURCES),
+        "premium_sources": list(PREMIUM_SOURCES),
+    }
