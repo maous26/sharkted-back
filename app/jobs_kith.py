@@ -257,7 +257,12 @@ def parse_kith_product(product: Dict, collection: str) -> Optional[DealItem]:
 
 
 def collect_all_kith(min_score: int = MIN_SCORE) -> Dict[str, Any]:
-    """Scrape toutes les collections KITH."""
+    """Scrape toutes les collections KITH - Skip pendant les heures de pause."""
+    # Vérifier si on est dans les heures de pause (minuit-7h Paris)
+    if is_quiet_hours():
+        logger.info("KITH scraping SKIPPED (quiet hours: 00h-07h Paris)")
+        return {"status": "skipped", "reason": "quiet_hours", "total_saved": 0}
+    
     results = {"collections": {}, "total_saved": 0, "total_skipped": 0, "total_no_discount": 0}
     
     for collection in KITH_COLLECTIONS:

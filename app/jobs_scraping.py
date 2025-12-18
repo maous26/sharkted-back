@@ -16,6 +16,7 @@ import redis
 import os
 
 from app.core.logging import get_logger, set_trace_id
+from app.scheduler import is_quiet_hours
 from app.utils.http_stealth import random_delay
 from app.core.source_policy import SOURCE_POLICIES, get_policy
 from app.services.scraping_service import (
@@ -32,6 +33,9 @@ from app.collectors.sources.size import fetch_size_product
 from app.collectors.sources.jdsports import fetch_jdsports_product
 from app.collectors.sources.asos import fetch_asos_product
 from app.collectors.sources.laredoute import fetch_laredoute_product
+from app.collectors.sources.bstn import fetch_bstn_product
+from app.collectors.sources.footpatrol import fetch_footpatrol_product
+from app.collectors.sources.printemps import fetch_printemps_product
 
 # Models
 from app.models.deal import Deal
@@ -48,6 +52,9 @@ COLLECTORS = {
     "jdsports": fetch_jdsports_product,
     "asos": fetch_asos_product,
     "laredoute": fetch_laredoute_product,
+    "bstn": fetch_bstn_product,
+    "footpatrol": fetch_footpatrol_product,
+    "printemps": fetch_printemps_product,
 }
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -252,7 +259,12 @@ def scrape_all_sources(
 
 
 def scheduled_scraping():
-    """Job planifié."""
+    """Job planifié - Skip pendant les heures de pause (minuit-7h Paris)."""
+    # Vérifier si on est dans les heures de pause
+    if is_quiet_hours():
+        logger.info("=== Scheduled scraping SKIPPED (quiet hours: 00h-07h Paris) ===")
+        return {"status": "skipped", "reason": "quiet_hours", "total_new": 0}
+    
     logger.info("=== Scheduled scraping START ===")
     result = scrape_all_sources(max_products_per_source=30)
     logger.info(f"=== Scheduled scraping END: {result.get('total_new', 0)} new deals ===")

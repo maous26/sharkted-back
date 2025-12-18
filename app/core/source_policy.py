@@ -199,15 +199,16 @@ SOURCE_POLICIES: Dict[str, SourcePolicy] = {
         base_interval_sec=90,
         allow_slow=True,
         allow_proxy=True,
-        enabled=True,
-        reason="Shopify-based - accès direct possible",
+        enabled=False,
+        reason="SPA - requires Playwright",
     ),
     "footpatrol": SourcePolicy(
         mode=CollectMode.DIRECT,
         base_interval_sec=60,
         allow_slow=True,
         allow_proxy=True,
-        enabled=True,
+        enabled=False,
+        reason="SPA - requires Playwright",
         warmup=WarmupConfig(
             homepage="https://www.footpatrol.com/",
             category_patterns=["/sale/", "/mens/footwear/"],
@@ -222,19 +223,18 @@ SOURCE_POLICIES: Dict[str, SourcePolicy] = {
     # === SOURCES PREMIUM (Web Unlocker requis) ===
     "galerieslafayette": SourcePolicy(
         mode=CollectMode.WEB_UNLOCKER,
-        enabled=True,
+        enabled=False,
         plan_required="premium",
-        reason="Protection anti-bot - Web Unlocker requis",
     ),
-    "printemps": SourcePolicy(
+    "printemps": SourcePolicy(  # Re-enabled: JSON-LD works
         mode=CollectMode.WEB_UNLOCKER,
         enabled=True,
+        reason="JSON-LD extraction via Web Unlocker",
         plan_required="premium",
-        reason="Protection anti-bot - Web Unlocker requis",
     ),
     "sns": SourcePolicy(
         mode=CollectMode.WEB_UNLOCKER,
-        enabled=True,
+        enabled=False,
         plan_required="premium",
         reason="Sneakersnstuff - Web Unlocker requis",
     ),
@@ -244,7 +244,7 @@ SOURCE_POLICIES: Dict[str, SourcePolicy] = {
         allow_slow=True,
         allow_proxy=True,
         enabled=True,
-        reason="La Redoute - accès direct possible",
+        reason="HTML data-productid extraction",
         warmup=WarmupConfig(
             homepage="https://www.laredoute.fr/",
             category_patterns=["/pplp/cat-831/", "/pplp/cat-830/"],

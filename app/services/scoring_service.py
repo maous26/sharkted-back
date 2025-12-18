@@ -291,7 +291,9 @@ class ScoringEngineV3:
         
         # Le prix de revente estimé est basé sur le prix original
         # (ce que les gens sont prêts à payer pour du neuf)
-        estimated_resale = original_price * multiplier
+        # Utiliser sale_price si original_price est 0 ou None
+        base_price = original_price if original_price and original_price > 0 else sale_price
+        estimated_resale = base_price * multiplier
         
         # Différentes stratégies de prix
         return {
