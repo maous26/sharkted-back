@@ -2,8 +2,7 @@
 Admin Router - Administration endpoints.
 Endpoints: /v1/admin/*
 """
-
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import text
 from pydantic import BaseModel
@@ -15,6 +14,16 @@ from app.db.session import SessionLocal
 from app.core.source_policy import get_all_source_metrics
 from app.core.logging import get_logger
 from app.core.config import JWT_SECRET, JWT_ALGO
+from app.models.user import User
+from app.models.proxy_settings import ProxySettings
+
+# Auto-repair imports
+from app.services.scraping_autorepair import (
+    diagnose_and_repair,
+    check_all_sources_health,
+    get_recent_failures,
+)
+from app.services.scraping_service import SOURCE_LISTING_URLS
 from app.models.user import User
 from app.models.proxy_settings import ProxySettings
 from app.models.subscription import (
@@ -33,44 +42,28 @@ router = APIRouter(prefix="/v1/admin", tags=["admin"])
 bearer = HTTPBearer(auto_error=False)
 
 
-def get_current_admin(
-    request: Request,
-    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)
-) -> dict:
-    """Verify admin access with logging (Head or Cookie)."""
+def get_current_admin(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
+    """Verify admin access with logging."""
     logger.info(f"get_current_admin called")
-    
-    token = None
-    if creds:
-        token = creds.credentials
-    else:
-        # Fallback to cookie
-        token = request.cookies.get("access_token")
-        
-    if not token:
+    if not creds:
         logger.warning("No credentials provided")
         raise HTTPException(status_code=401, detail="Missing token")
-        
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
         email = payload.get("sub")
         logger.info(f"Token decoded for: {email}")
         if not email:
             raise HTTPException(status_code=401, detail="Invalid token")
-            
         session = SessionLocal()
         try:
             user = session.query(User).filter(User.email == email).first()
             if not user:
                 logger.warning(f"User not found: {email}")
                 raise HTTPException(status_code=401, detail="User not found")
-            
             is_admin = user.email == "admin@sharkted.fr" or (user.plan or "").lower() in ("pro", "agency", "owner", "premium")
             logger.info(f"User {email} plan={user.plan} is_admin={is_admin}")
-            
             if not is_admin:
                 raise HTTPException(status_code=403, detail="Admin access required")
-                
             return {"user_id": user.id, "email": user.email, "is_admin": True}
         finally:
             session.close()
@@ -79,13 +72,37 @@ def get_current_admin(
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-def get_current_admin_with_log(
-    request: Request,
-    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)
-) -> dict:
-    """Verify admin access by checking the database (Head or Cookie)."""
-    # Reuse the main function logic since it already does everything effectively
-    return get_current_admin(request, creds)
+def get_current_admin_with_log(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
+    """Verify admin access by checking the database."""
+    if not creds:
+        raise HTTPException(status_code=401, detail="Missing token")
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
+        email = payload.get("sub")
+        if not email:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Check admin status from database
+        session = SessionLocal()
+        try:
+            user = session.query(User).filter(User.email == email).first()
+            if not user:
+                raise HTTPException(status_code=401, detail="User not found")
+            
+            # Check if admin
+            is_admin = user.email == "admin@sharkted.fr" or (user.plan or "").lower() in ("pro", "agency", "owner", "premium")
+            if not is_admin:
+                raise HTTPException(status_code=403, detail="Admin access required")
+            
+            return {
+                "user_id": user.id,
+                "email": user.email,
+                "is_admin": True,
+            }
+        finally:
+            session.close()
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # =============================================================================
 # STATS
@@ -741,9 +758,126 @@ def get_scraping_stats():
     """
     try:
         from app.services.scraping_orchestrator import get_premium_scraping_stats
-        return get_premium_scraping_stats()
     except Exception as e:
         return {"error": str(e)}
+
+# =============================================================================
+# AUTO-REPAIR ENDPOINTS (Restoring missing functionality)
+# =============================================================================
+
+@router.get("/scraping/health")
+async def check_sources_health():
+    """
+    Vérifie la santé de toutes les sources actives.
+    Retourne quelles sources fonctionnent et lesquelles ont besoin de réparation.
+    """
+    try:
+        results = check_all_sources_health()
+
+        # Summary
+        ok = [s for s, r in results.items() if r.get("status") == "ok"]
+        errors = [s for s, r in results.items() if r.get("needs_repair")]
+
+        return {
+            "status": "ok" if not errors else "degraded",
+            "healthy_sources": ok,
+            "sources_needing_repair": errors,
+            "details": results
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/scraping/failures")
+async def get_failures(hours: int = Query(24, ge=1, le=168)):
+    """
+    Récupère les échecs de scraping récents.
+    """
+    try:
+        failures = get_recent_failures(hours)
+        return {
+            "hours": hours,
+            "total_failures": len(failures),
+            "failures": failures
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/scraping/diagnose/{source}")
+async def diagnose_source(
+    source: str,
+    url: Optional[str] = None,
+    autofix: bool = Query(False, description="Appliquer automatiquement le fix si confiance > 70%")
+):
+    """
+    Diagnostique un scraper cassé avec l'IA.
+
+    - source: Nom de la source (courir, asos, printemps, etc.)
+    - url: URL spécifique à tester (sinon utilise la première URL de listing)
+    - autofix: Si True et confiance > 70%, applique le fix automatiquement
+    """
+    # Get listing URL
+    listing_url = url
+    if not listing_url:
+        urls = SOURCE_LISTING_URLS.get(source, [])
+        if not urls:
+            raise HTTPException(status_code=404, detail=f"No URLs configured for {source}")
+        listing_url = urls[0]
+
+    logger.info(f"Diagnosing {source} with URL: {listing_url}")
+
+    try:
+        result = await diagnose_and_repair(
+            source=source,
+            listing_url=listing_url,
+            autofix=autofix
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Diagnosis failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/scraping/repair-all")
+async def repair_all_broken(
+    autofix: bool = Query(False, description="Appliquer les fixes automatiquement")
+):
+    """
+    Diagnostique et répare toutes les sources cassées.
+    """
+    # First check health
+    health = check_all_sources_health()
+
+    broken = [s for s, r in health.items() if r.get("needs_repair")]
+
+    if not broken:
+        return {"status": "all_healthy", "repaired": []}
+
+    results = []
+    for source in broken:
+        try:
+            urls = SOURCE_LISTING_URLS.get(source, [])
+            if urls:
+                result = await diagnose_and_repair(
+                    source=source,
+                    listing_url=urls[0],
+                    autofix=autofix
+                )
+                results.append(result)
+        except Exception as e:
+            results.append({
+                "source": source,
+                "status": "error",
+                "error": str(e)
+            })
+
+    return {
+        "broken_sources": broken,
+        "repair_results": results,
+        "autofix_enabled": autofix
+    }
 
 
 # =============================================================================
@@ -753,7 +887,6 @@ def get_scraping_stats():
 from rq import Queue
 import redis
 import os
-from fastapi import BackgroundTasks, Query
 
 # Redis connection for admin actions
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
