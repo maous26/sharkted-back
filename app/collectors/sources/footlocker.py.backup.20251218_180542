@@ -1,0 +1,379 @@
+"""  
+Collector Footlocker FR - Extraction de produits via JSON-LD.
+
+Footlocker.fr est accessible via cloudscraper et fournit un JSON-LD Product complet.
+"""
+import json
+import re
+from typing import Optional
+
+import cloudscraper
+from app.utils.http_stealth import create_stealth_scraper, get_stealth_headers, random_delay, get_proxy, should_use_proxy
+import requests.exceptions
+
+from app.normalizers.item import DealItem
+from app.core.exceptions import (
+    BlockedError,
+    HTTPError,
+    NetworkError,
+    TimeoutError,
+    DataExtractionError,
+    ValidationError,
+)
+from app.utils.retry import retry_on_network_errors
+
+SOURCE = "footlocker"
+
+_JSONLD_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_sku_from_url(url: str) -> Optional[str]:
+    """Extrait le SKU de l'URL (ex: .../314217910604.html -> 314217910604)."""
+    match = re.search(r'/(\d{10,})\.html', url)
+    return match.group(1) if match else None
+
+
+def _is_category_page(url: str, html: str) -> bool:
+    """Détecte si c'est une page de catégorie plutôt qu'une page produit."""
+    # Vérifier l'URL
+    category_patterns = [
+        '/category/',
+        '/soldes.html',
+        '/outlet.html',
+        '/nouveautes.html',
+        '/search',
+        '/inspiration/'
+    ]
+    
+    for pattern in category_patterns:
+        if pattern in url.lower():
+            return True
+    
+    # Vérifier le HTML pour des indicateurs de page catégorie
+    category_indicators = [
+        r'<meta[^>]*name=["\']robots["\'][^>]*content=["\'][^"\']*(noindex|nofollow)[^"\']',
+        r'class=["\'][^"\']*(product-listing|category|search-results)[^"\']',
+        r'<title[^>]*>\s*Foot Locker France\s*</title>',
+        r'aria-label=["\']Principaux["\']',  # Navigation principale
+        r'HeaderNavigation',  # Navigation header spécifique à footlocker
+    ]
+    
+    for pattern in category_indicators:
+        if re.search(pattern, html, re.IGNORECASE):
+            return True
+    
+    # Si pas de JSON-LD Product trouvé, probablement une catégorie
+    product_jsonld_found = False
+    for match in _JSONLD_RE.finditer(html):
+        try:
+            jsonld = json.loads(match.group(1).strip())
+            if isinstance(jsonld, dict) and jsonld.get("@type") == "Product":
+                product_jsonld_found = True
+                break
+        except (json.JSONDecodeError, KeyError):
+            continue
+    
+    return not product_jsonld_found
+
+
+def _detect_blocking_protection(html: str) -> tuple[bool, str]:
+    """Détecte la présence de protections anti-bot."""
+    # Kasada protection
+    kasada_patterns = [
+        r'/[a-f0-9-]{36}/[a-f0-9-]{36}/p\.js',
+        r'kpsdk-load',
+        r'window\.KPSDK'
+    ]
+    
+    for pattern in kasada_patterns:
+        if re.search(pattern, html):
+            return True, "Kasada"
+    
+    # Cloudflare protection
+    cloudflare_patterns = [
+        r'cf-ray',
+        r'cloudflare',
+        r'cf-browser-verification'
+    ]
+    
+    for pattern in cloudflare_patterns:
+        if re.search(pattern, html, re.IGNORECASE):
+            return True, "Cloudflare"
+    
+    # Autres protections courantes
+    other_patterns = [
+        r'blocked',
+        r'access.denied',
+        r'bot.detected'
+    ]
+    
+    for pattern in other_patterns:
+        if re.search(pattern, html, re.IGNORECASE):
+            return True, "Unknown"
+    
+    return False, ""
+
+
+def _extract_product_data(html: str, url: str) -> dict:
+    """
+    Extrait les données produit depuis le JSON-LD.
+    Footlocker fournit un JSON-LD Product complet.
+    """
+    data = {
+        "name": None,
+        "price": None,
+        "original_price": None,
+        "discount_percent": None,
+        "currency": "EUR",
+        "image": None,
+        "sku": _extract_sku_from_url(url),
+        "brand": None,
+    }
+
+    # Chercher le JSON-LD Product
+    for match in _JSONLD_RE.finditer(html):
+        try:
+            jsonld = json.loads(match.group(1).strip())
+            if isinstance(jsonld, dict) and jsonld.get("@type") == "Product":
+                data["name"] = jsonld.get("name")
+                data["brand"] = jsonld.get("brand")
+                data["sku"] = jsonld.get("sku") or data["sku"]
+
+                # Image peut être string ou array
+                image = jsonld.get("image")
+                if isinstance(image, list):
+                    data["image"] = image[0] if image else None
+                else:
+                    data["image"] = image
+
+                # Prix dans offers
+                offers = jsonld.get("offers", {})
+                if isinstance(offers, dict):
+                    price = offers.get("price")
+                    if price:
+                        try:
+                            data["price"] = float(price)
+                        except (ValueError, TypeError):
+                            pass
+                    data["currency"] = offers.get("priceCurrency", "EUR")
+                elif isinstance(offers, list) and offers:
+                    price = offers[0].get("price")
+                    if price:
+                        try:
+                            data["price"] = float(price)
+                        except (ValueError, TypeError):
+                            pass
+                    data["currency"] = offers[0].get("priceCurrency", "EUR")
+
+                break
+        except (json.JSONDecodeError, KeyError):
+            continue
+    
+    # Prix original (prix barré dans le HTML)
+    was_price_patterns = [
+        r'class="[^"]*(?:was|strike|crossed|old|original)[^"]*"[^>]*>([^<]*[0-9]+[,.]?[0-9]*)',
+        r'data-price-was="([^"]+)"',
+        r'<span[^>]*class="[^"]*price[^"]*was[^"]*"[^>]*>([^<]+)</span>'
+    ]
+    
+    for pattern in was_price_patterns:
+        was_price = re.search(pattern, html, re.IGNORECASE)
+        if was_price:
+            try:
+                price_str = re.sub(r'[^\d.,]', '', was_price.group(1)).replace(",", ".")
+                if price_str:
+                    data["original_price"] = float(price_str)
+                    break
+            except ValueError:
+                continue
+    
+    # Calcul discount_percent
+    if data["price"] and data["original_price"] and data["original_price"] > data["price"]:
+        data["discount_percent"] = round(
+            (1 - data["price"] / data["original_price"]) * 100, 1
+        )
+
+    # Fallback: meta tags si JSON-LD incomplet
+    if not data["name"]:
+        meta_patterns = [
+            r'<meta property="og:title"[^>]*content="([^"]+)"',
+            r'<meta name="title"[^>]*content="([^"]+)"',
+            r'<title[^>]*>([^<]+)</title>'
+        ]
+        
+        for pattern in meta_patterns:
+            match = re.search(pattern, html)
+            if match:
+                title = match.group(1).strip()
+                if title and title != "Foot Locker France" and not re.search(r'\b(category|soldes|outlet)\b', title.lower()):
+                    data["name"] = title
+                    break
+
+    if not data["image"]:
+        og_image = re.search(r'<meta property="og:image"[^>]*content="([^"]+)"', html)
+        if og_image:
+            data["image"] = og_image.group(1)
+
+    return data
+
+
+@retry_on_network_errors(retries=3, source=SOURCE)
+def fetch_footlocker_product(url: str) -> DealItem:
+    """
+    Récupère et parse un produit Footlocker FR.
+
+    Raises:
+        BlockedError: Si bloqué
+        TimeoutError: Si timeout réseau
+        NetworkError: Si erreur réseau
+        HTTPError: Si erreur HTTP autre
+        DataExtractionError: Si données non trouvées
+        ValidationError: Si données invalides
+    """
+    # Vérification préliminaire de l'URL
+    if '/category/' in url or url.endswith('/soldes.html') or url.endswith('/outlet.html'):
+        raise DataExtractionError(
+            "URL de catégorie détectée dans l'URL - une URL de produit spécifique est requise",
+            source=SOURCE,
+            url=url,
+        )
+    
+    scraper, headers = create_stealth_scraper("footlocker")
+    
+    # Headers supplémentaires pour éviter les blocages
+    headers.update({
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    })
+
+    try:
+        proxies = get_proxy() if should_use_proxy("footlocker") else None
+        resp = scraper.get(url, headers=headers, proxies=proxies, timeout=30)
+    except requests.exceptions.Timeout as e:
+        raise TimeoutError(
+            "Timeout après 30s",
+            source=SOURCE,
+            url=url,
+        ) from e
+    except requests.exceptions.ConnectionError as e:
+        raise NetworkError(
+            f"Erreur de connexion: {e}",
+            source=SOURCE,
+            url=url,
+        ) from e
+    except requests.exceptions.RequestException as e:
+        raise NetworkError(
+            f"Erreur réseau: {e}",
+            source=SOURCE,
+            url=url,
+        ) from e
+
+    # Vérifier le status HTTP
+    if resp.status_code == 403:
+        raise BlockedError(
+            "Bloqué par protection anti-bot (403)",
+            source=SOURCE,
+            url=url,
+            status_code=403,
+        )
+
+    if resp.status_code == 404:
+        raise DataExtractionError(
+            "Produit non trouvé (404)",
+            source=SOURCE,
+            url=url,
+        )
+
+    if resp.status_code == 400:
+        # Analyser le contenu pour comprendre la cause du 400
+        is_blocked, protection_type = _detect_blocking_protection(resp.text)
+        if is_blocked:
+            raise BlockedError(
+                f"Bloqué par protection anti-bot {protection_type} (HTTP 400)",
+                source=SOURCE,
+                url=url,
+                status_code=400,
+            )
+        elif _is_category_page(url, resp.text):
+            raise DataExtractionError(
+                "URL de catégorie fournie au lieu d'une page produit",
+                source=SOURCE,
+                url=url,
+            )
+        else:
+            raise HTTPError(
+                "Erreur HTTP 400 - Requête invalide, possiblement bloquée",
+                status_code=400,
+                source=SOURCE,
+                url=url,
+            )
+
+    if resp.status_code >= 400:
+        raise HTTPError(
+            f"Erreur HTTP {resp.status_code}",
+            status_code=resp.status_code,
+            source=SOURCE,
+            url=url,
+        )
+
+    # Détecter les protections anti-bot
+    is_blocked, protection_type = _detect_blocking_protection(resp.text)
+    if is_blocked:
+        raise BlockedError(
+            f"Protection anti-bot {protection_type} détectée",
+            source=SOURCE,
+            url=url,
+            status_code=resp.status_code,
+        )
+
+    # Vérifier si c'est une page de catégorie
+    if _is_category_page(url, resp.text):
+        raise DataExtractionError(
+            "Cette URL pointe vers une page de catégorie, pas vers un produit spécifique",
+            source=SOURCE,
+            url=url,
+        )
+
+    # Extraire les données
+    data = _extract_product_data(resp.text, url)
+
+    # Validation
+    if not data["name"]:
+        raise DataExtractionError(
+            "Nom du produit non trouvé - vérifiez que l'URL pointe vers un produit valide",
+            source=SOURCE,
+            url=url,
+        )
+
+    if not data["price"] or data["price"] <= 0:
+        raise ValidationError(
+            f"Prix invalide: {data['price']}",
+            field="price",
+            source=SOURCE,
+            url=url,
+        )
+
+    # Construire l'external_id
+    external_id = data["sku"] or url.split("/")[-1].replace(".html", "")
+
+    return DealItem(
+        source=SOURCE,
+        external_id=external_id,
+        title=data["name"],
+        price=data["price"],
+        original_price=data.get("original_price"),
+        discount_percent=data.get("discount_percent"),
+        currency=data["currency"],
+        url=url,
+        image_url=data["image"],
+        seller_name=data["brand"],
+        brand=data["brand"],
+        raw=data,
+    )

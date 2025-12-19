@@ -1,16 +1,18 @@
 """
-Scraper KITH EU - Avec scoring autonome immédiat.
-Version 2: Meilleure extraction des prix.
+Scraper KITH EU - Avec scoring COMPLET.
+Version 3: Scoring complet avec recommended_price et estimated_sell_days.
 """
 
 import httpx
+import asyncio
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from loguru import logger
 
+from app.scheduler import is_quiet_hours
 from app.normalizers.item import DealItem
-from app.services.autonomous_scoring_service import score_deal_autonomous
+from app.services.scoring_service_hybrid import score_deal_hybrid  # Scoring hybride Vinted + fallback
 from app.db.session import SessionLocal
 from app.models.deal_score import DealScore
 from app.repositories.deal_repository import DealRepository
@@ -33,107 +35,139 @@ HEADERS = {
 
 
 def persist_kith_deal_with_score(item: DealItem, score_data: Dict, session) -> Dict:
-    """Persiste un deal KITH avec son score."""
+    """Persiste un deal KITH avec son score complet (recommended_price, estimated_sell_days)."""
     repo = DealRepository(session)
     existing = repo.get_by_source_and_id(item.source, item.external_id)
     was_existing = existing is not None
-    
+
     deal = repo.upsert(item)
     deal_id = deal.id
-    
+
     existing_score = session.query(DealScore).filter(DealScore.deal_id == deal_id).first()
-    if not existing_score:
+    if existing_score:
+        # Update - mettre à jour tous les champs
+        existing_score.flip_score = score_data.get('flip_score', 0)
+        existing_score.margin_score = score_data.get('margin_score', 0)
+        existing_score.liquidity_score = score_data.get('liquidity_score', 0)
+        existing_score.popularity_score = score_data.get('popularity_score', 0)
+        existing_score.recommended_action = score_data.get('recommended_action')
+        existing_score.recommended_price = score_data.get('recommended_price')
+        existing_score.confidence = score_data.get('confidence')
+        existing_score.explanation = score_data.get('explanation')
+        existing_score.explanation_short = score_data.get('explanation_short')
+        existing_score.risks = score_data.get('risks', [])
+        existing_score.estimated_sell_days = score_data.get('estimated_sell_days')
+        existing_score.score_breakdown = score_data.get('score_breakdown', {})
+        existing_score.model_version = score_data.get('model_version', 'autonomous_v3')
+        existing_score.updated_at = datetime.utcnow()
+    else:
+        # Create - avec tous les champs du scoring complet
         deal_score = DealScore(
             deal_id=deal_id,
             flip_score=score_data.get('flip_score', 0),
-            margin_score=score_data.get('discount_score'),
-            liquidity_score=score_data.get('brand_score'),
-            popularity_score=score_data.get('model_score'),
+            margin_score=score_data.get('margin_score', 0),
+            liquidity_score=score_data.get('liquidity_score', 0),
+            popularity_score=score_data.get('popularity_score', 0),
             recommended_action=score_data.get('recommended_action'),
+            recommended_price=score_data.get('recommended_price'),
             confidence=score_data.get('confidence'),
             explanation=score_data.get('explanation'),
             explanation_short=score_data.get('explanation_short'),
             risks=score_data.get('risks', []),
             score_breakdown=score_data.get('score_breakdown', {}),
-            model_version='autonomous_v1',
+            model_version=score_data.get('model_version', 'autonomous_v3'),
+            estimated_sell_days=score_data.get('estimated_sell_days'),
         )
         session.add(deal_score)
-    
-    return {"id": deal_id, "action": "updated" if was_existing else "created"}
+
+    return {
+        "id": deal_id,
+        "action": "updated" if was_existing else "created",
+        "recommended_price": score_data.get('recommended_price'),
+        "estimated_sell_days": score_data.get('estimated_sell_days'),
+    }
 
 
 def collect_kith_collection(collection: str = "footwear-sale", limit: int = 250, min_score: int = MIN_SCORE) -> Dict[str, Any]:
-    """Scrape une collection KITH avec scoring autonome."""
+    """Scrape une collection KITH avec scoring COMPLET."""
     url = f"{KITH_BASE_URL}/collections/{collection}/products.json"
-    
+
     all_products = []
     page = 1
-    
+
     try:
         while len(all_products) < limit:
             params = {"limit": min(250, limit - len(all_products)), "page": page}
-            
+
             with httpx.Client(timeout=30) as client:
                 response = client.get(url, params=params, headers=HEADERS)
-                
+
                 if response.status_code != 200:
                     logger.warning(f"KITH {collection}: HTTP {response.status_code}")
                     break
-                
+
                 data = response.json()
                 products = data.get("products", [])
-                
+
                 if not products:
                     break
-                
+
                 all_products.extend(products)
                 logger.info(f"KITH {collection} page {page}: {len(products)} products")
-                
+
                 if len(products) < 250:
                     break
                 page += 1
-        
+
         deals_saved = 0
         deals_skipped = 0
         deals_no_discount = 0
-        
+
         session = SessionLocal()
-        
+
+        # Event loop pour le scoring async
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         try:
             for product in all_products:
                 deal_item = parse_kith_product(product, collection)
                 if not deal_item:
                     deals_no_discount += 1
                     continue
-                
-                # Vérifier discount minimum
+
+                # Vérifier discount minimum (30%)
                 if not deal_item.discount_percent or deal_item.discount_percent < MIN_DISCOUNT:
                     deals_no_discount += 1
                     continue
-                
-                # Score autonome
+
+                # Score COMPLET (async)
                 deal_data = {
-                    "title": deal_item.title,
+                    "product_name": deal_item.title,
                     "brand": deal_item.brand,
                     "model": deal_item.model,
-                    "category": deal_item.category,
+                    "category": deal_item.category or "default",
+                    "color": None,
+                    "gender": deal_item.gender,
                     "discount_percent": deal_item.discount_percent,
-                    "price": deal_item.price,
                     "sizes_available": deal_item.sizes_available,
+                    "sale_price": deal_item.price,
+                    "original_price": deal_item.original_price,
                 }
-                score_result = score_deal_autonomous(deal_data)
+                score_result = loop.run_until_complete(score_deal_hybrid(deal_data, use_vinted=True, use_ai=True))
                 flip_score = score_result.get('flip_score', 0)
-                
+
                 if flip_score < min_score:
                     deals_skipped += 1
                     continue
-                
+
                 persist_kith_deal_with_score(deal_item, score_result, session)
                 session.commit()
                 deals_saved += 1
-                logger.info(f"KITH: {deal_item.title[:35]} | -{deal_item.discount_percent:.0f}% | Score: {flip_score:.1f}")
-                
+                logger.info(f"KITH: {deal_item.title[:35]} | -{deal_item.discount_percent:.0f}% | Score: {flip_score:.1f} | Price: {score_result.get('recommended_price')}")
+
         finally:
+            loop.close()
             session.close()
         
         return {
@@ -257,7 +291,12 @@ def parse_kith_product(product: Dict, collection: str) -> Optional[DealItem]:
 
 
 def collect_all_kith(min_score: int = MIN_SCORE) -> Dict[str, Any]:
-    """Scrape toutes les collections KITH."""
+    """Scrape toutes les collections KITH - Skip pendant les heures de pause."""
+    # Vérifier si on est dans les heures de pause (minuit-7h Paris)
+    if is_quiet_hours():
+        logger.info("KITH scraping SKIPPED (quiet hours: 00h-07h Paris)")
+        return {"status": "skipped", "reason": "quiet_hours", "total_saved": 0}
+    
     results = {"collections": {}, "total_saved": 0, "total_skipped": 0, "total_no_discount": 0}
     
     for collection in KITH_COLLECTIONS:

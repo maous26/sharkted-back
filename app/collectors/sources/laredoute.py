@@ -2,15 +2,13 @@
 Collector La Redoute - Extraction de produits textiles.
 
 La Redoute - données produit depuis JSON-LD et meta tags.
+Utilise Web Unlocker pour bypass protection anti-bot.
 """
 import re
 import json
 from typing import Optional
 
-import cloudscraper
-from app.utils.http_stealth import create_stealth_scraper, get_stealth_headers
-import requests.exceptions
-
+import httpx
 from app.normalizers.item import DealItem
 from app.core.exceptions import (
     BlockedError,
@@ -21,6 +19,7 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.utils.retry import retry_on_network_errors
+from app.services.scraping_orchestrator import get_proxy
 
 SOURCE = "laredoute"
 
@@ -56,19 +55,19 @@ def _extract_product_data(html: str, url: str) -> dict:
             ld_data = json.loads(match.strip())
             if isinstance(ld_data, dict) and ld_data.get("@type") == "Product":
                 data["name"] = ld_data.get("name")
-                
+
                 brand = ld_data.get("brand")
                 if isinstance(brand, dict):
                     data["brand"] = brand.get("name")
                 elif isinstance(brand, str):
                     data["brand"] = brand
-                
+
                 image = ld_data.get("image")
                 if isinstance(image, list) and image:
                     data["image"] = image[0]
                 elif isinstance(image, str):
                     data["image"] = image
-                    
+
                 offers = ld_data.get("offers", {})
                 if isinstance(offers, dict):
                     price = offers.get("price")
@@ -93,7 +92,7 @@ def _extract_product_data(html: str, url: str) -> dict:
             data["price"] = float(price_match.group(1).replace(",", "."))
         except ValueError:
             pass
-    
+
     # Prix barré
     was_match = re.search(
         r'class="[^"]*(?:strike|crossed|was|ancien)[^"]*"[^>]*>\s*([0-9]+[,.]?[0-9]*)\s*[€EUR]',
@@ -105,11 +104,9 @@ def _extract_product_data(html: str, url: str) -> dict:
         except ValueError:
             pass
 
-    # 3. Discount
-    discount_match = re.search(r'-\s*(\d+)\s*%', html)
-    if discount_match:
-        data["discount_percent"] = float(discount_match.group(1))
-    elif data["price"] and data["original_price"] and data["original_price"] > data["price"]:
+    # 3. Discount - Only from price comparison, not from promo text
+    # Don't capture generic "-50%" which may be conditional promos
+    if data["price"] and data["original_price"] and data["original_price"] > data["price"]:
         data["discount_percent"] = round(
             (1 - data["price"] / data["original_price"]) * 100, 1
         )
@@ -119,7 +116,7 @@ def _extract_product_data(html: str, url: str) -> dict:
         og_title = re.search(r'<meta property="og:title"[^>]*content="([^"]+)"', html)
         if og_title:
             data["name"] = og_title.group(1).split(" | ")[0].strip()
-            
+
     if not data["image"]:
         og_image = re.search(r'<meta property="og:image"[^>]*content="([^"]+)"', html)
         if og_image:
@@ -129,7 +126,8 @@ def _extract_product_data(html: str, url: str) -> dict:
     if not data["brand"] and data["name"]:
         brands = ["Lacoste", "Tommy Hilfiger", "Ralph Lauren", "Nike", "Adidas",
                   "The North Face", "Calvin Klein", "Levi's", "Guess", "Kaporal",
-                  "Schott", "Superdry", "Scotch & Soda"]
+                  "Schott", "Superdry", "Scotch & Soda", "POLO RALPH LAUREN",
+                  "NAPAPIJRI", "BARBOUR", "GANT", "HACKETT"]
         name_lower = data["name"].lower()
         for brand in brands:
             if brand.lower() in name_lower:
@@ -141,17 +139,28 @@ def _extract_product_data(html: str, url: str) -> dict:
 
 @retry_on_network_errors(retries=2, source=SOURCE)
 def fetch_laredoute_product(url: str) -> DealItem:
-    """Récupère et parse un produit La Redoute."""
-    scraper, headers = create_stealth_scraper("laredoute")
-    
+    """Récupère et parse un produit La Redoute via Web Unlocker."""
+    # La Redoute nécessite Web Unlocker pour bypass protection
+    proxy_config = get_proxy("web_unlocker")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    }
+
     try:
-        resp = scraper.get(url, headers=headers, timeout=30)
-    except requests.exceptions.Timeout as e:
+        with httpx.Client(
+            timeout=30,
+            follow_redirects=True,
+            proxy=proxy_config.get("http") if proxy_config else None,
+            verify=False if proxy_config else True,
+        ) as client:
+            resp = client.get(url, headers=headers)
+    except httpx.TimeoutException as e:
         raise TimeoutError("Timeout après 30s", source=SOURCE, url=url) from e
-    except requests.exceptions.ConnectionError as e:
+    except httpx.ConnectError as e:
         raise NetworkError(f"Erreur de connexion: {e}", source=SOURCE, url=url) from e
-    except requests.exceptions.RequestException as e:
-        raise NetworkError(f"Erreur réseau: {e}", source=SOURCE, url=url) from e
 
     if resp.status_code == 403:
         raise BlockedError("Bloqué par protection anti-bot", source=SOURCE, url=url, status_code=403)

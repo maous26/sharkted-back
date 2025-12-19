@@ -599,3 +599,7 @@ def unblock_source_endpoint(source: str):
         "current_mode": m.current_mode.value,
         "message": f"Source '{source}' unblocked" if was_blocked else f"Source '{source}' was not blocked",
     }
+
+# Auto-repair router
+from app.routers.autorepair_router import router as autorepair_router
+app.include_router(autorepair_router)  # /v1/admin/scraping/*

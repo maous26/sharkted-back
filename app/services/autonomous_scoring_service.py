@@ -354,6 +354,57 @@ def calculate_autonomous_score(
     if discount_pct and discount_pct < 25:
         risks.append("Low discount reduces margin potential")
     
+    # ==========================================================================
+    # CALCUL DU PRIX RECOMMANDÉ ET TEMPS DE VENTE ESTIMÉ (sans données Vinted)
+    # ==========================================================================
+    recommended_price = None
+    estimated_sell_days = None
+    profit_estimate = None
+
+    if price and discount_pct:
+        # Prix d'achat = prix actuel soldé
+        buy_price = price
+
+        # Estimation du prix de revente basée sur:
+        # - Prix original comme référence du "marché"
+        # - Facteur marque (les bonnes marques se revendent mieux)
+        # - Condition = neuf (100%)
+        original = price / (1 - discount_pct / 100) if discount_pct < 100 else price * 1.5
+
+        # Facteur de revente basé sur la marque
+        brand_resale_factor = 0.70  # Par défaut 70% du prix original
+        if brand_score >= 90:
+            brand_resale_factor = 0.85  # Nike, Jordan = 85%
+        elif brand_score >= 75:
+            brand_resale_factor = 0.80  # NB, Adidas, Asics = 80%
+        elif brand_score >= 60:
+            brand_resale_factor = 0.75  # Puma, Converse = 75%
+
+        # Facteur modèle (les modèles populaires se vendent plus cher)
+        model_resale_bonus = 0
+        if model_score >= 90:
+            model_resale_bonus = 0.05  # Dunk, Samba, etc. = +5%
+        elif model_score >= 75:
+            model_resale_bonus = 0.02  # Modèles populaires = +2%
+
+        # Prix de revente estimé
+        resale_price = original * (brand_resale_factor + model_resale_bonus)
+        recommended_price = round(max(resale_price, buy_price * 1.15), 2)  # Minimum +15%
+
+        # Profit estimé
+        profit_estimate = round(recommended_price - buy_price, 2)
+
+        # Temps de vente estimé basé sur la liquidité (brand + model score)
+        liquidity = (brand_score + model_score) / 2
+        if liquidity >= 85:
+            estimated_sell_days = 5  # Très liquide
+        elif liquidity >= 70:
+            estimated_sell_days = 10
+        elif liquidity >= 55:
+            estimated_sell_days = 15
+        else:
+            estimated_sell_days = 21  # Moins liquide
+
     return {
         "flip_score": round(flip_score, 1),
         "discount_score": discount_score,
@@ -367,6 +418,9 @@ def calculate_autonomous_score(
         "explanation_short": f"{action}: {explanation[:50]}..." if len(explanation) > 50 else f"{action}: {explanation}",
         "risks": risks,
         "estimated_margin_pct": estimated_margin_pct,
+        "recommended_price": recommended_price,
+        "estimated_sell_days": estimated_sell_days,
+        "profit_estimate": profit_estimate,
         "matched_brand": matched_brand,
         "matched_model": matched_model,
         "bonus_applied": bonus,
@@ -378,7 +432,7 @@ def calculate_autonomous_score(
             "sizes": {"score": size_score, "weight": 0.10},
             "bonus": bonus,
         },
-        "model_version": "autonomous_v1",
+        "model_version": "autonomous_v2",
     }
 
 

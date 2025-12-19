@@ -294,3 +294,130 @@ async def scoring_stats():
         }
     finally:
         session.close()
+
+
+@router.post("/vinted-batch")
+async def score_vinted_batch(
+    limit: int = 20,
+    source: Optional[str] = None,
+    min_listings: int = 0
+):
+    """
+    Score les deals qui n'ont pas de stats Vinted.
+
+    - limit: Nombre max de deals à scorer
+    - source: Filtrer par source (printemps, laredoute, etc.)
+    - min_listings: Nombre min d'annonces Vinted pour inclure dans les résultats
+    """
+    session = SessionLocal()
+    results = []
+    errors = []
+
+    try:
+        # Get deals without Vinted stats
+        query = session.query(Deal).outerjoin(VintedStats).filter(
+            VintedStats.id == None,
+            Deal.in_stock == True
+        )
+
+        if source:
+            query = query.filter(Deal.source == source)
+
+        deals = query.order_by(Deal.id.desc()).limit(limit).all()
+
+        logger.info(f"Vinted batch: {len(deals)} deals to process (source={source})")
+
+        scored = 0
+        for deal in deals:
+            try:
+                # Get Vinted stats
+                vinted_data = await get_vinted_stats_for_deal(
+                    product_name=deal.title,
+                    brand=deal.brand or deal.seller_name,
+                    sale_price=deal.price,
+                    sizes_available=deal.sizes_available
+                )
+
+                nb_listings = vinted_data.get('nb_listings', 0)
+
+                # Save Vinted stats (even if 0 listings)
+                vinted_stats = VintedStats(
+                    deal_id=deal.id,
+                    nb_listings=nb_listings,
+                    price_min=vinted_data.get('price_min'),
+                    price_max=vinted_data.get('price_max'),
+                    price_avg=vinted_data.get('price_avg'),
+                    price_median=vinted_data.get('price_median'),
+                    price_p25=vinted_data.get('price_p25'),
+                    price_p75=vinted_data.get('price_p75'),
+                    margin_euro=vinted_data.get('margin_euro'),
+                    margin_pct=vinted_data.get('margin_pct'),
+                    liquidity_score=vinted_data.get('liquidity_score'),
+                    sample_listings=vinted_data.get('sample_listings', []),
+                    search_query=vinted_data.get('query_used', '')
+                )
+                session.add(vinted_stats)
+
+                # Update deal score if we have listings
+                if nb_listings >= min_listings:
+                    # Re-score with Vinted data
+                    deal_data = {
+                        'product_name': deal.title,
+                        'brand': deal.brand or deal.seller_name,
+                        'model': deal.model,
+                        'category': deal.category or 'default',
+                        'color': deal.color,
+                        'gender': deal.gender,
+                        'discount_percent': deal.discount_percent or 0,
+                        'sizes_available': deal.sizes_available,
+                    }
+
+                    score_result = await score_deal(deal_data, vinted_data)
+
+                    # Update existing score
+                    existing_score = session.query(DealScore).filter(DealScore.deal_id == deal.id).first()
+                    if existing_score:
+                        existing_score.flip_score = score_result['flip_score']
+                        existing_score.popularity_score = score_result.get('popularity_score')
+                        existing_score.liquidity_score = score_result.get('liquidity_score')
+                        existing_score.margin_score = score_result.get('margin_score')
+                        existing_score.score_breakdown = score_result.get('score_breakdown')
+                        existing_score.recommended_action = score_result['recommended_action']
+                        existing_score.recommended_price = score_result.get('recommended_price')
+                        existing_score.confidence = score_result['confidence']
+                        existing_score.explanation = score_result['explanation']
+                        existing_score.explanation_short = score_result['explanation_short']
+                        existing_score.risks = score_result.get('risks', [])
+
+                    deal.score = score_result['flip_score']
+                    scored += 1
+
+                results.append({
+                    'deal_id': deal.id,
+                    'title': deal.title[:40],
+                    'source': deal.source,
+                    'vinted_listings': nb_listings,
+                    'flip_score': deal.score,
+                    'query_used': vinted_data.get('query_used', '')
+                })
+
+                session.commit()
+
+            except Exception as e:
+                session.rollback()
+                errors.append({'deal_id': deal.id, 'error': str(e)[:100]})
+                logger.warning(f"Error processing deal {deal.id}: {e}")
+
+        return {
+            'processed': len(deals),
+            'scored': scored,
+            'results': results,
+            'errors': errors
+        }
+
+    except Exception as e:
+        logger.error(f"Batch error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+

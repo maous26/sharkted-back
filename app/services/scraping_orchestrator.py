@@ -42,6 +42,7 @@ class ScrapingMethod(str, Enum):
     HTTP_DIRECT = "http_direct"           # Sans proxy
     HTTP_DATACENTER = "http_datacenter"   # Proxy datacenter (cheap)
     HTTP_RESIDENTIAL = "http_residential" # Proxy résidentiel (premium) - Phase 2
+    WEB_UNLOCKER = "web_unlocker"         # BrightData Web Unlocker (premium)
     BROWSER_RESIDENTIAL = "browser"       # Playwright + proxy résidentiel - Phase 2
 
 
@@ -278,20 +279,7 @@ TARGET_CONFIGS: Dict[str, TargetConfig] = {
     # =========================================================================
     # SOURCES DÉSACTIVÉES - Nécessitent des proxies résidentiels (Phase 2)
     # =========================================================================
-    "footlocker": TargetConfig(
-        slug="footlocker",
-        name="Foot Locker",
-        base_url="https://www.footlocker.fr",
-        protection=TargetProtection.AKAMAI,
-        allowed_methods=[
-            ScrapingMethod.HTTP_RESIDENTIAL,
-            ScrapingMethod.BROWSER_RESIDENTIAL,
-        ],
-        requires_residential=True,
-        requests_per_second=0.5,
-        enabled=False,  # Désactivé Phase 1
-        disabled_reason="Requires residential proxies (Akamai protection)",
-    ),
+
     "adidas": TargetConfig(
         slug="adidas",
         name="Adidas",
@@ -333,6 +321,83 @@ TARGET_CONFIGS: Dict[str, TargetConfig] = {
         requests_per_second=0.3,
         enabled=False,  # Désactivé Phase 1
         disabled_reason="Requires residential proxies (Akamai protection)",
+    ),
+    # =========================================================================
+    # SOURCES WEB UNLOCKER - BrightData
+    # =========================================================================
+    "asos": TargetConfig(
+        slug="asos",
+        name="ASOS",
+        base_url="https://www.asos.com",
+        protection=TargetProtection.AKAMAI,
+        allowed_methods=[
+            ScrapingMethod.WEB_UNLOCKER,
+        ],
+        requires_residential=False,  # Web Unlocker gère tout
+        requests_per_second=1.0,
+        enabled=True,
+    ),
+    "laredoute": TargetConfig(
+        slug="laredoute",
+        name="La Redoute",
+        base_url="https://www.laredoute.fr",
+        protection=TargetProtection.CLOUDFLARE,
+        allowed_methods=[
+            ScrapingMethod.WEB_UNLOCKER,
+        ],
+        requires_residential=False,
+        requests_per_second=1.0,
+        enabled=True,
+    ),
+    "footlocker": TargetConfig(
+        slug="footlocker",
+        name="Foot Locker",
+        base_url="https://www.footlocker.fr",
+        protection=TargetProtection.AKAMAI,
+        allowed_methods=[
+            ScrapingMethod.WEB_UNLOCKER,
+        ],
+        requires_residential=False,
+        requests_per_second=0.5,
+        enabled=True,  # Activé avec Web Unlocker
+    ),
+    "bstn": TargetConfig(
+        slug="bstn",
+        name="BSTN",
+        base_url="https://www.bstn.com",
+        protection=TargetProtection.BASIC,
+        allowed_methods=[
+            ScrapingMethod.HTTP_DIRECT,
+            ScrapingMethod.HTTP_DATACENTER,
+        ],
+        requires_residential=False,
+        requests_per_second=1.5,
+        enabled=True,
+    ),
+    "footpatrol": TargetConfig(
+        slug="footpatrol",
+        name="Footpatrol",
+        base_url="https://www.footpatrol.com",
+        protection=TargetProtection.BASIC,
+        allowed_methods=[
+            ScrapingMethod.HTTP_DIRECT,
+            ScrapingMethod.HTTP_DATACENTER,
+        ],
+        requires_residential=False,
+        requests_per_second=1.5,
+        enabled=True,
+    ),
+    "printemps": TargetConfig(
+        slug="printemps",
+        name="Printemps",
+        base_url="https://www.printemps.com",
+        protection=TargetProtection.CLOUDFLARE,
+        allowed_methods=[
+            ScrapingMethod.WEB_UNLOCKER,
+        ],
+        requires_residential=False,
+        requests_per_second=1.0,
+        enabled=True,
     ),
 }
 
@@ -674,6 +739,8 @@ class ScraperFactory:
             proxies = get_proxy("datacenter")
         elif method == ScrapingMethod.HTTP_RESIDENTIAL:
             proxies = get_proxy("residential")
+        elif method == ScrapingMethod.WEB_UNLOCKER:
+            proxies = get_proxy("web_unlocker")
         
         if proxies:
             scraper.proxies = proxies
@@ -735,19 +802,41 @@ class ScrapingOrchestrator:
         timeout: int,
         config: TargetConfig,
     ) -> Tuple[Optional[str], ErrorType, Dict]:
-        scraper, proxies = ScraperFactory.create_http_scraper(target, method)
-        
         start_time = time.perf_counter()
         status_code = None
         error_type = ErrorType.SUCCESS
         content = None
+        proxies = None
+        
         metadata = {
             "method": method.value,
-            "proxy_used": proxies is not None,
+            "proxy_used": False,
         }
         
         try:
-            resp = scraper.get(url, timeout=timeout)
+            # Web Unlocker utilise httpx avec proxy BrightData
+            if method == ScrapingMethod.WEB_UNLOCKER:
+                proxies = get_proxy("web_unlocker")
+                metadata["proxy_used"] = proxies is not None
+                
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+                }
+                
+                with httpx.Client(
+                    timeout=timeout,
+                    follow_redirects=True,
+                    proxy=proxies.get("http") if proxies else None,
+                    verify=False,
+                ) as client:
+                    resp = client.get(url, headers=headers)
+            else:
+                # Autres méthodes utilisent cloudscraper
+                scraper, proxies = ScraperFactory.create_http_scraper(target, method)
+                metadata["proxy_used"] = proxies is not None
+                resp = scraper.get(url, timeout=timeout)
             status_code = resp.status_code
             duration_ms = (time.perf_counter() - start_time) * 1000
             

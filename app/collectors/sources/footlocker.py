@@ -1,10 +1,12 @@
-"""
-Collector Footlocker FR - Extraction de produits via JSON-LD.
+"""collector Footlocker FR - Extraction de produits via JSON-LD.
 
-Footlocker.fr est accessible via cloudscraper et fournit un JSON-LD Product complet.
+Footlocker.fr utilise des protections anti-bot avancées (Kasada + Queue-it).
+Nécessite des URLs de produits spécifiques, pas de pages de catégorie.
 """
 import json
 import re
+import time
+import random
 from typing import Optional
 
 import cloudscraper
@@ -36,10 +38,126 @@ def _extract_sku_from_url(url: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _is_category_page(url: str, html: str = "") -> bool:
+    """Détecte si c'est une page de catégorie plutôt qu'une page produit."""
+    # Vérification URL - patterns étendus et plus précis
+    category_patterns = [
+        '/category/',
+        '/soldes.html',
+        '/outlet.html', 
+        '/nouveautes.html',
+        '/search',
+        '/inspiration/',
+        '/collection/',
+        '/promo',
+        '/sale',
+        '/flx.html',  # Page membership
+    ]
+    
+    for pattern in category_patterns:
+        if pattern in url.lower():
+            return True
+    
+    # Si pas de HTML, s'arrêter à l'URL
+    if not html:
+        return False
+    
+    # Vérifications HTML renforcées pour détecter les pages de catégorie
+    category_indicators = [
+        r'<meta[^>]*name=["\']robots["\'][^>]*content=["\'][^"\']*(noindex|nofollow)[^"\']',
+        r'<title[^>]*>\s*Foot Locker France\s*</title>',  # Titre générique
+        r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\'][^"\']*(?:/category/|/soldes\.html|/outlet\.html)',
+        r'aria-label=["\']Principaux["\']',  # Navigation principale
+        r'HeaderNavigation',  # Navigation header
+        r'NavigationMenu--list',  # Menu de navigation
+        r'aria-label=["\']Carrousel de promotions["\']',  # Carrousel promos
+        r'promo_banner_slide',  # Slides de promotion
+        r'data-bi=["\'][^"\']*location["\'][^"\']:["\'][^"\']promos',  # Analytics promos
+        r'class=["\'][^"\']*(?:product-listing|category|search-results)[^"\']*',
+        r'Showing banner \d+ of \d+',  # Banners rotatifs
+        r'c-header__main.*NavigationMenu',  # Structure de navigation principale
+        r'HeaderNavigation-item.*HeaderNavigation-link',  # Items de navigation
+    ]
+    
+    for pattern in category_indicators:
+        if re.search(pattern, html, re.IGNORECASE):
+            return True
+    
+    # Vérification JSON-LD plus stricte
+    has_website_only = False
+    has_product = False
+    
+    for match in _JSONLD_RE.finditer(html):
+        try:
+            jsonld_text = match.group(1).strip()
+            if not jsonld_text:
+                continue
+                
+            jsonld = json.loads(jsonld_text)
+            if isinstance(jsonld, dict):
+                json_type = jsonld.get("@type")
+                if json_type == "WebSite":
+                    has_website_only = True
+                elif json_type == "Product":
+                    has_product = True
+                    # Vérifier que c'est un vrai produit avec des données
+                    if not jsonld.get("name") or not jsonld.get("offers"):
+                        has_product = False
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+    
+    # Page catégorie si seulement WebSite sans Product valide
+    if has_website_only and not has_product:
+        return True
+    
+    return False
+
+
+def _detect_blocking_protection(html: str) -> tuple[bool, str]:
+    """Détecte la présence de protections anti-bot avec patterns mis à jour."""
+    # Kasada protection - patterns actualisés
+    kasada_patterns = [
+        r'/[a-f0-9-]{8}-[a-f0-9-]{4}-[a-f0-9-]{4}-[a-f0-9-]{4}-[a-f0-9-]{12}/[a-f0-9-]{8}-[a-f0-9-]{4}-[a-f0-9-]{4}-[a-f0-9-]{4}-[a-f0-9-]{12}/p\.js',
+        r'document\.addEventListener\(["\']kpsdk-load',
+        r'window\.KPSDK\.configure',
+        r'KPSDK\.configure',
+        r'kpsdk-load',
+    ]
+    
+    for pattern in kasada_patterns:
+        if re.search(pattern, html, re.IGNORECASE):
+            return True, "Kasada"
+    
+    # Queue-it protection - patterns actualisés
+    queue_patterns = [
+        r'static\.queue-it\.net/script/',
+        r'queueclient\.min\.js',
+        r'queueconfigloader\.min\.js',
+        r'data-queueit-c=',
+        r'queue-it\.net',
+    ]
+    
+    for pattern in queue_patterns:
+        if re.search(pattern, html, re.IGNORECASE):
+            return True, "Queue-it"
+    
+    # Cloudflare et autres protections
+    protection_patterns = [
+        (r'cf-ray|cloudflare|__cf_bm', "Cloudflare"),
+        (r'blocked|access[\s\.]denied|bot[\s\.]detected', "Anti-bot"),
+        (r'captcha|security[\s\.]check|please[\s\.]wait', "Security Check"),
+    ]
+    
+    for pattern, protection_name in protection_patterns:
+        if re.search(pattern, html, re.IGNORECASE):
+            return True, protection_name
+    
+    return False, ""
+
+
 def _extract_product_data(html: str, url: str) -> dict:
     """
-    Extrait les données produit depuis le JSON-LD.
-    Footlocker fournit un JSON-LD Product complet.
+    Extrait les données produit depuis le JSON-LD avec fallbacks améliorés.
     """
     data = {
         "name": None,
@@ -52,147 +170,324 @@ def _extract_product_data(html: str, url: str) -> dict:
         "brand": None,
     }
 
-    # Chercher le JSON-LD Product
+    # Extraction JSON-LD Product
     for match in _JSONLD_RE.finditer(html):
         try:
-            jsonld = json.loads(match.group(1).strip())
+            jsonld_text = match.group(1).strip()
+            if not jsonld_text:
+                continue
+                
+            jsonld = json.loads(jsonld_text)
             if isinstance(jsonld, dict) and jsonld.get("@type") == "Product":
+                # Nom du produit
                 data["name"] = jsonld.get("name")
-                data["brand"] = jsonld.get("brand")
+                
+                # Marque
+                brand = jsonld.get("brand")
+                if isinstance(brand, dict):
+                    data["brand"] = brand.get("name")
+                else:
+                    data["brand"] = brand
+                
+                # SKU
                 data["sku"] = jsonld.get("sku") or data["sku"]
 
-                # Image peut être string ou array
+                # Image
                 image = jsonld.get("image")
-                if isinstance(image, list):
-                    data["image"] = image[0] if image else None
-                else:
+                if isinstance(image, list) and image:
+                    data["image"] = image[0]
+                elif isinstance(image, str):
                     data["image"] = image
 
                 # Prix dans offers
-                offers = jsonld.get("offers", {})
+                offers = jsonld.get("offers")
                 if isinstance(offers, dict):
-                    data["price"] = offers.get("price")
+                    price = offers.get("price")
+                    if price:
+                        try:
+                            data["price"] = float(price)
+                        except (ValueError, TypeError):
+                            pass
                     data["currency"] = offers.get("priceCurrency", "EUR")
                 elif isinstance(offers, list) and offers:
-                    data["price"] = offers[0].get("price")
-                    data["currency"] = offers[0].get("priceCurrency", "EUR")
+                    offer = offers[0]
+                    price = offer.get("price")
+                    if price:
+                        try:
+                            data["price"] = float(price)
+                        except (ValueError, TypeError):
+                            pass
+                    data["currency"] = offer.get("priceCurrency", "EUR")
 
                 break
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError, TypeError):
             continue
     
-    # Prix original (prix barré dans le HTML)
-    was_price = re.search(r'class="[^"]*(?:was|strike|crossed|old|original)[^"]*"[^>]*>([^<]*[0-9]+[,.]?[0-9]*)', html, re.IGNORECASE)
-    if was_price:
-        try:
-            price_str = re.sub(r'[^\d.,]', '', was_price.group(1)).replace(",", ".")
-            if price_str:
-                data["original_price"] = float(price_str)
-        except ValueError:
-            pass
+    # Prix original (prix barré) - patterns améliorés
+    was_price_patterns = [
+        r'class="[^"]*(?:was|strike|crossed|old|original|before)[^"]*"[^>]*>\s*([^<]*[0-9]+[,.]?[0-9]*)',
+        r'data-price-was="([^"]+)"',
+        r'<del[^>]*>\s*([^<]*[0-9]+[,.]?[0-9]*)',
+        r'<s[^>]*>\s*([^<]*[0-9]+[,.]?[0-9]*)',
+    ]
     
-    # Calcul discount_percent
-    if data["price"] and data["original_price"] and data["original_price"] > data["price"]:
+    for pattern in was_price_patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            try:
+                price_str = re.sub(r'[^\d.,]', '', match.group(1)).replace(",", ".")
+                if price_str and '.' in price_str[-3:]:
+                    data["original_price"] = float(price_str)
+                    break
+            except (ValueError, TypeError):
+                continue
+    
+    # Calcul pourcentage de réduction
+    if (data["price"] and data["original_price"] and 
+        data["original_price"] > data["price"]):
         data["discount_percent"] = round(
             (1 - data["price"] / data["original_price"]) * 100, 1
         )
 
-    # Fallback: meta tags si JSON-LD incomplet
+    # Fallbacks pour données manquantes
     if not data["name"]:
-        og_title = re.search(r'<meta property="og:title"[^>]*content="([^"]+)"', html)
-        if og_title:
-            data["name"] = og_title.group(1).strip()
+        # Meta tags
+        meta_patterns = [
+            r'<meta property="og:title"[^>]*content="([^"]+)"',
+            r'<meta name="title"[^>]*content="([^"]+)"',
+            r'<title[^>]*>([^<]+)</title>'
+        ]
+        
+        for pattern in meta_patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                title = match.group(1).strip()
+                # Éviter les titres génériques
+                if (title and title != "Foot Locker France" and 
+                    not re.search(r'\b(category|soldes|outlet|nouveautes)\b', title.lower())):
+                    data["name"] = title
+                    break
 
     if not data["image"]:
-        og_image = re.search(r'<meta property="og:image"[^>]*content="([^"]+)"', html)
-        if og_image:
-            data["image"] = og_image.group(1)
+        og_image_match = re.search(r'<meta property="og:image"[^>]*content="([^"]+)"', html)
+        if og_image_match:
+            data["image"] = og_image_match.group(1)
 
     return data
+
+
+def _create_enhanced_scraper() -> tuple[cloudscraper.CloudScraper, dict]:
+    """Crée un scraper avec paramètres anti-détection optimisés."""
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'mobile': False
+        },
+        delay=random.uniform(3, 7)  # Délai plus long pour Kasada
+    )
+    
+    # Headers ultra-réalistes - version 2024
+    headers = {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
+        'Sec-CH-UA': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'Sec-CH-UA-Mobile': '?0',
+        'Sec-CH-UA-Platform': '"Windows"',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
+    return scraper, headers
 
 
 @retry_on_network_errors(retries=2, source=SOURCE)
 def fetch_footlocker_product(url: str) -> DealItem:
     """
     Récupère et parse un produit Footlocker FR.
-
+    
+    Args:
+        url: URL du produit (doit être une page produit, pas une catégorie)
+    
     Raises:
-        BlockedError: Si bloqué
+        BlockedError: Si bloqué par les protections anti-bot
         TimeoutError: Si timeout réseau
         NetworkError: Si erreur réseau
-        HTTPError: Si erreur HTTP autre
-        DataExtractionError: Si données non trouvées
+        HTTPError: Si erreur HTTP
+        DataExtractionError: Si URL de catégorie ou données non trouvées
         ValidationError: Si données invalides
     """
-    scraper, headers = create_stealth_scraper("footlocker")
+    # Vérification préliminaire de l'URL avec message plus explicite
+    if _is_category_page(url):
+        raise DataExtractionError(
+            f"URL de catégorie détectée: {url}. "
+            f"Footlocker nécessite une URL de produit spécifique avec format /product/nom-produit/123456789.html. "
+            f"Les pages de catégorie comme /category/soldes.html ne contiennent pas de données de produit individuelles. "
+            f"Exemple d'URL valide: https://www.footlocker.fr/fr/product/nike-air-max-270/314217910604.html",
+            source=SOURCE,
+            url=url,
+        )
+    
+    # Délai anti-détection
+    time.sleep(random.uniform(4, 10))
+    
+    scraper, headers = _create_enhanced_scraper()
+    
+    max_retries = 2
+    base_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            # Utiliser des proxies pour contourner les protections
+            proxies = get_proxy() if should_use_proxy("footlocker") else None
+            
+            resp = scraper.get(
+                url, 
+                headers=headers, 
+                proxies=proxies, 
+                timeout=90,  # Timeout très long pour les protections
+                allow_redirects=True
+            )
+            break
+            
+        except requests.exceptions.Timeout as e:
+            if attempt == max_retries - 1:
+                raise TimeoutError(
+                    "Timeout après 90s - Footlocker utilise des protections (Kasada + Queue-it) qui peuvent considérablement ralentir le chargement des pages",
+                    source=SOURCE,
+                    url=url,
+                ) from e
+            time.sleep(base_delay * (2 ** attempt))
+            continue
+            
+        except requests.exceptions.ConnectionError as e:
+            if attempt == max_retries - 1:
+                raise NetworkError(
+                    f"Erreur de connexion: {e}. Footlocker peut bloquer certaines IP.",
+                    source=SOURCE,
+                    url=url,
+                ) from e
+            time.sleep(base_delay * (2 ** attempt))
+            continue
+            
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries - 1:
+                raise NetworkError(
+                    f"Erreur réseau: {e}",
+                    source=SOURCE,
+                    url=url,
+                ) from e
+            time.sleep(base_delay * (2 ** attempt))
+            continue
 
-    try:
-        proxies = get_proxy() if should_use_proxy("footlocker") else None
-        resp = scraper.get(url, headers=headers, proxies=proxies, timeout=30)
-    except requests.exceptions.Timeout as e:
-        raise TimeoutError(
-            "Timeout après 30s",
+    # Vérifier immédiatement si c'est une page de catégorie avec HTML
+    if _is_category_page(url, resp.text):
+        raise DataExtractionError(
+            f"Cette URL pointe vers une page de catégorie (confirmé par l'analyse HTML): {url}. "
+            f"Footlocker nécessite l'URL d'un produit individuel pour extraire les données produit. "
+            f"Les pages de catégorie comme /category/soldes.html affichent des listes de produits mais ne contiennent pas de JSON-LD Product. "
+            f"Utilisez l'URL d'un produit spécifique au format: /product/nom-produit/XXXXXXXXXX.html",
             source=SOURCE,
             url=url,
-        ) from e
-    except requests.exceptions.ConnectionError as e:
-        raise NetworkError(
-            f"Erreur de connexion: {e}",
-            source=SOURCE,
-            url=url,
-        ) from e
-    except requests.exceptions.RequestException as e:
-        raise NetworkError(
-            f"Erreur réseau: {e}",
-            source=SOURCE,
-            url=url,
-        ) from e
+        )
 
-    # Vérifier le status HTTP
-    if resp.status_code == 403:
+    # Détection des protections anti-bot
+    is_blocked, protection_type = _detect_blocking_protection(resp.text)
+    if is_blocked:
         raise BlockedError(
-            "Bloqué par protection anti-bot",
+            f"Protection anti-bot {protection_type} détectée (HTTP {resp.status_code}). "
+            f"Footlocker utilise des protections avancées (Kasada + Queue-it) qui bloquent les scrapers automatisés. "
+            f"Ces protections nécessitent l'exécution de JavaScript complexe et la résolution de challenges cryptographiques "
+            f"qui ne peuvent être contournés qu'avec un navigateur réel ou des outils spécialisés très avancés.",
+            source=SOURCE,
+            url=url,
+            status_code=resp.status_code,
+        )
+
+    # Gestion des codes d'erreur HTTP avec messages spécifiques
+    if resp.status_code == 400:
+        raise BlockedError(
+            "Requête invalide (HTTP 400) - Footlocker a rejeté la requête, probablement à cause des protections anti-bot. "
+            "Les systèmes Kasada et Queue-it analysent les patterns de requêtes et bloquent les comportements automatisés. "
+            "Cette erreur indique que votre requête a été identifiée comme non-humaine.",
+            source=SOURCE,
+            url=url,
+            status_code=400,
+        )
+        
+    elif resp.status_code == 403:
+        raise BlockedError(
+            "Accès refusé (HTTP 403) - Protection anti-bot Kasada active. "
+            "Votre IP, User-Agent ou comportement de navigation a été détecté comme automatisé.",
             source=SOURCE,
             url=url,
             status_code=403,
         )
-
-    if resp.status_code == 404:
+        
+    elif resp.status_code == 404:
         raise DataExtractionError(
-            "Produit non trouvé (404)",
+            "Produit non trouvé (HTTP 404) - Vérifiez que l'URL est correcte et que le produit existe toujours. "
+            "Il est possible que le produit ait été retiré du catalogue.",
             source=SOURCE,
             url=url,
         )
-
-    if resp.status_code >= 400:
+        
+    elif resp.status_code >= 500:
         raise HTTPError(
-            "Erreur HTTP",
+            f"Erreur serveur Footlocker (HTTP {resp.status_code}) - Le site peut être temporairement indisponible. "
+            f"Réessayez plus tard.",
+            status_code=resp.status_code,
+            source=SOURCE,
+            url=url,
+        )
+        
+    elif resp.status_code >= 400:
+        raise HTTPError(
+            f"Erreur HTTP {resp.status_code} - Vérifiez l'URL et votre connectivité",
             status_code=resp.status_code,
             source=SOURCE,
             url=url,
         )
 
-    # Extraire les données
+    # Extraction des données produit
     data = _extract_product_data(resp.text, url)
 
-    # Validation
+    # Validations strictes avec messages explicites
     if not data["name"]:
         raise DataExtractionError(
-            "Nom du produit non trouvé",
+            "Nom du produit non trouvé dans la page. "
+            "Cela peut indiquer que l'URL ne pointe pas vers un produit valide, "
+            "que la structure de la page Footlocker a changé, "
+            "ou que les protections anti-bot empêchent le chargement complet du contenu.",
             source=SOURCE,
             url=url,
         )
 
     if not data["price"] or data["price"] <= 0:
         raise ValidationError(
-            f"Prix invalide: {data['price']}",
+            f"Prix invalide ou manquant: {data['price']}. "
+            f"Le produit n'a pas de prix valide dans les données JSON-LD. "
+            f"Vérifiez que le produit est disponible à la vente.",
             field="price",
             source=SOURCE,
             url=url,
         )
 
-    # Construire l'external_id
-    external_id = data["sku"] or url.split("/")[-1].replace(".html", "")
+    # Construction de l'external_id
+    external_id = data["sku"]
+    if not external_id:
+        # Fallback: extraire de l'URL
+        external_id = url.split("/")[-1].replace(".html", "")
+        if not external_id or len(external_id) < 5:
+            external_id = str(hash(url))[-10:]  # Dernière option
 
     return DealItem(
         source=SOURCE,

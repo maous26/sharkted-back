@@ -157,49 +157,63 @@ SOURCE_LISTING_URLS: Dict[str, List[str]] = {
         "https://kith.com/collections/sale",
     ],
     "bstn": [
-        "https://www.bstn.com/eu_en/sale.html",
-        "https://www.bstn.com/eu_en/sneaker.html",
-        "https://www.bstn.com/eu_en/new.html",
+        "https://www.bstn.com/eu_en/men/footwear.html",
+        "https://www.bstn.com/eu_en/women/footwear.html",
+        "https://www.bstn.com/eu_en/men.html",
     ],
     "footpatrol": [
-        "https://www.footpatrol.com/sale/",
         "https://www.footpatrol.com/footwear/",
-        "https://www.footpatrol.com/mens/footwear/sale/",
+        "https://www.footpatrol.com/mens/footwear/trainers/",
+        "https://www.footpatrol.com/womens/footwear/trainers/",
     ],
     "galerieslafayette": [
         "https://www.galerieslafayette.com/c/homme/chaussures/baskets/remise",
         "https://www.galerieslafayette.com/c/femme/chaussures/baskets/remise",
     ],
     "printemps": [
-        # TEXTILE en priorité - Soldes
-        "https://www.printemps.com/fr/fr/soldes/homme/vetements?sortBy=discount_desc",
-        "https://www.printemps.com/fr/fr/soldes/femme/vetements?sortBy=discount_desc",
-        "https://www.printemps.com/fr/fr/soldes/homme/pulls-gilets-sweats?sortBy=discount_desc",
-        "https://www.printemps.com/fr/fr/soldes/femme/pulls-gilets-sweats?sortBy=discount_desc",
-        # Puis sneakers
-        "https://www.printemps.com/fr/fr/soldes/homme/chaussures/baskets--sneakers?sortBy=discount_desc",
-        "https://www.printemps.com/fr/fr/soldes/femme/chaussures/baskets--sneakers?sortBy=discount_desc",
+        # SOLDES PRET-A-PORTER - Priorité textile luxe (pas sneakers)
+        "https://www.printemps.com/fr/fr/soldes-pret-a-porter-homme",
+        "https://www.printemps.com/fr/fr/soldes-pret-a-porter-femme",
+        # Mailles et pulls luxe
+        "https://www.printemps.com/fr/fr/mailles-pulls-homme",
+        "https://www.printemps.com/fr/fr/mailles-pulls-femme",
+        # Manteaux premium
+        "https://www.printemps.com/fr/fr/manteaux-homme",
+        "https://www.printemps.com/fr/fr/manteaux-femme",
+        # Vestes
+        "https://www.printemps.com/fr/fr/vestes-homme",
+        "https://www.printemps.com/fr/fr/vestes-femme",
     ],
     "laredoute": [
-        # TEXTILE en priorité - Soldes
-        "https://www.laredoute.fr/pplp/cat-831/aspx/promo-1.aspx",  # Vêtements homme soldes
-        "https://www.laredoute.fr/pplp/cat-830/aspx/promo-1.aspx",  # Vêtements femme soldes
-        "https://www.laredoute.fr/pplp/cat-1110/aspx/promo-1.aspx", # Pulls homme soldes
-        "https://www.laredoute.fr/pplp/cat-1109/aspx/promo-1.aspx", # Pulls femme soldes
-        # Marques premium
-        "https://www.laredoute.fr/brand-lacoste.aspx?promo=1",
-        "https://www.laredoute.fr/brand-tommy-hilfiger.aspx?promo=1",
+        # OUTLET HOMME - Marques premium (jusqu'à -70%)
+        "https://www.laredoute.fr/pplp/1326/cat-1345.aspx?brndid=tommy-hilfiger",
+        "https://www.laredoute.fr/pplp/1326/cat-1345.aspx?brndid=polo-ralph-lauren",
+        "https://www.laredoute.fr/pplp/1326/cat-1345.aspx?brndid=lacoste",
+        "https://www.laredoute.fr/pplp/1326/cat-1345.aspx?brndid=calvin-klein",
+        "https://www.laredoute.fr/pplp/1326/cat-1345.aspx?brndid=the-north-face",
+        "https://www.laredoute.fr/pplp/1326/1345/cat-2326.aspx?brndid=tommy-hilfiger",
+        # OUTLET FEMME - Marques premium
+        "https://www.laredoute.fr/pplp/1326/cat-1327.aspx?brndid=tommy-hilfiger",
+        "https://www.laredoute.fr/pplp/1326/cat-1327.aspx?brndid=polo-ralph-lauren",
+        "https://www.laredoute.fr/pplp/1326/cat-1327.aspx?brndid=lacoste",
+        "https://www.laredoute.fr/pplp/1326/cat-1327.aspx?brndid=calvin-klein",
     ],
     "asos": [
-        # TEXTILE en priorité - Grosses remises
-        "https://www.asos.com/fr/homme/soldes/cat/?cid=8409&sort=discount",
-        "https://www.asos.com/fr/femme/soldes/cat/?cid=7046&sort=discount",
-        "https://www.asos.com/fr/homme/pulls-cardigans/cat/?cid=7617&sale=true",
-        "https://www.asos.com/fr/femme/pulls-cardigans/cat/?cid=2637&sale=true",
-        # Marques premium
-        "https://www.asos.com/fr/homme/marque-a-a-z/north-face/cat/?cid=27424&sale=true",
-        "https://www.asos.com/fr/homme/marque-a-a-z/nike/cat/?cid=4766&sale=true",
-        "https://www.asos.com/fr/homme/marque-a-a-z/adidas-originals/cat/?cid=7113&sale=true",
+        # Marques premium via search (sale=true fonctionne)
+        "https://www.asos.com/fr/search/?q=ralph+lauren&sale=true",
+        "https://www.asos.com/fr/search/?q=tommy+hilfiger&sale=true",
+        "https://www.asos.com/fr/search/?q=calvin+klein&sale=true",
+        "https://www.asos.com/fr/search/?q=lacoste&sale=true",
+        "https://www.asos.com/fr/search/?q=north+face&sale=true",
+        "https://www.asos.com/fr/search/?q=barbour&sale=true",
+        "https://www.asos.com/fr/search/?q=carhartt&sale=true",
+        "https://www.asos.com/fr/search/?q=allsaints&sale=true",
+        "https://www.asos.com/fr/search/?q=fred+perry&sale=true",
+        # Marques par catégorie (sans sale=true qui cause 422)
+        "https://www.asos.com/fr/homme/marque-a-a-z/polo-ralph-lauren/cat/?cid=18797",
+        "https://www.asos.com/fr/homme/marque-a-a-z/tommy-hilfiger/cat/?cid=20796",
+        "https://www.asos.com/fr/femme/marque-a-a-z/polo-ralph-lauren/cat/?cid=18857",
+        "https://www.asos.com/fr/femme/marque-a-a-z/tommy-hilfiger/cat/?cid=20833",
     ],
     "sns": [
         "https://www.sneakersnstuff.com/en/sale/sneakers",
@@ -256,6 +270,14 @@ PRODUCT_URL_PATTERNS: Dict[str, List[str]] = {
         r'href="(https://www\.printemps\.com/fr/fr/[^"]+p\d+)"',
         r'href="(/fr/fr/[^"]+p\d+)"',
     ],
+    "bstn": [
+        r'href="(https://www\.bstn\.com/[^"]+\.html)"',
+        r'href="(/eu_en/[^"]+\.html)"',
+    ],
+    "footpatrol": [
+        r'href="(https://www\.footpatrol\.com/product/[^"]+)"',
+        r'href="(/product/[^"]+)"',
+    ],
 }
 
 # Base URLs pour construire les URLs complètes
@@ -270,6 +292,8 @@ BASE_URLS: Dict[str, str] = {
     "laredoute": "https://www.laredoute.fr",
     "kith": "https://kith.com",
     "printemps": "https://www.printemps.com",
+    "bstn": "https://www.bstn.com",
+    "footpatrol": "https://www.footpatrol.com",
 }
 
 
@@ -277,12 +301,81 @@ BASE_URLS: Dict[str, str] = {
 # CORE FUNCTIONS
 # =============================================================================
 
+def extract_product_urls_jsonld(html: str, source: str) -> Set[str]:
+    """
+    Extrait les URLs de produits depuis JSON-LD ItemList.
+    Utilisé pour Printemps qui expose les données via JSON-LD.
+    """
+    import json
+    urls = set()
+    base_url = BASE_URLS.get(source, "")
+
+    # Find JSON-LD scripts
+    jsonld_matches = re.findall(
+        r'<script type="application/ld\+json"[^>]*>([\s\S]*?)</script>',
+        html
+    )
+
+    for json_str in jsonld_matches:
+        try:
+            data = json.loads(json_str)
+
+            # Handle ItemList (Printemps style)
+            if isinstance(data, dict) and data.get("@type") == "ItemList":
+                items = data.get("itemListElement", [])
+                for item in items:
+                    # ItemList format: {"item": {"url": "..."}}
+                    product = item.get("item", {}) if "item" in item else item
+                    url = product.get("url", "")
+                    if url:
+                        if url.startswith("/"):
+                            url = base_url + url
+                        urls.add(url)
+
+            # Handle Product array
+            elif isinstance(data, list):
+                for item in data:
+                    if item.get("@type") == "Product":
+                        url = item.get("url", "")
+                        if url:
+                            if url.startswith("/"):
+                                url = base_url + url
+                            urls.add(url)
+
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue
+
+    return urls
+
+
 def extract_product_urls(html: str, source: str) -> Set[str]:
     """Extrait les URLs de produits depuis le HTML d'une page de listing."""
     urls = set()
+
+    # Special handling for sources with JSON-LD data
+    if source in ("printemps",):
+        jsonld_urls = extract_product_urls_jsonld(html, source)
+        if jsonld_urls:
+            return jsonld_urls
+
+    # Special handling for La Redoute (data-productid in HTML)
+    if source == "laredoute":
+        # Extract product IDs and build URLs
+        base_url = BASE_URLS.get(source, "")
+        product_ids = re.findall(r'data-productid="(prod-\d+)"', html)
+        for pid in product_ids:
+            urls.add(f"{base_url}/ppdp/{pid}.aspx")
+        # Also try href patterns
+        href_urls = re.findall(r'href="(/ppdp/prod-\d+\.aspx)', html)
+        for href in href_urls:
+            urls.add(base_url + href)
+        if urls:
+            return urls
+
+    # Standard regex-based extraction
     patterns = PRODUCT_URL_PATTERNS.get(source, [])
     base_url = BASE_URLS.get(source, "")
-    
+
     for pattern in patterns:
         matches = re.findall(pattern, html, re.IGNORECASE)
         for match in matches:
@@ -298,8 +391,9 @@ def extract_product_urls(html: str, source: str) -> Set[str]:
             url = url.split("#")[0]  # Enlever les ancres
             if url.startswith("http"):
                 urls.add(url)
-    
+
     return urls
+
 
 
 def crawl_listing_page(url: str, source: str) -> tuple[Set[str], Optional[str], str]:

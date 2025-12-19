@@ -45,9 +45,28 @@ class DealRepository:
 
             # Track changement de prix
             if existing.price != item.price:
-                existing.original_price = existing.price
                 existing.price = item.price
                 existing.price_updated_at = now
+
+            # Mettre à jour original_price si fourni par le collector
+            if item.original_price:
+                existing.original_price = item.original_price
+            if item.discount_percent:
+                existing.discount_percent = item.discount_percent
+
+            # Mettre à jour les métadonnées si fournies
+            if item.brand:
+                existing.brand = item.brand
+            if item.model:
+                existing.model = item.model
+            if item.category:
+                existing.category = item.category
+            if item.color:
+                existing.color = item.color
+            if item.gender:
+                existing.gender = item.gender
+            if item.sizes_available:
+                existing.sizes_available = item.sizes_available
 
             self.session.flush()
             return existing
@@ -67,6 +86,16 @@ class DealRepository:
                 first_seen_at=now,
                 last_seen_at=now,
                 in_stock=True,
+                # Prix et remise
+                original_price=item.original_price,
+                discount_percent=item.discount_percent,
+                # Metadata
+                brand=item.brand,
+                model=item.model,
+                category=item.category,
+                color=item.color,
+                gender=item.gender,
+                sizes_available=item.sizes_available,
             )
             self.session.add(deal)
             self.session.flush()

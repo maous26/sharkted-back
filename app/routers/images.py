@@ -54,10 +54,12 @@ async def proxy_image(url: str):
     
     # Domaines autorisés
     allowed_domains = [
-        "courir.com", "zalando.", "nike.com", "adidas.", 
+        "courir.com", "zalando.", "nike.com", "adidas.",
         "footlocker.", "jdsports.", "size.co.uk", "snipes.",
         "kith.com", "ssense.com", "endclothing.com",
         "demandware.static", "akamaized.net", "cloudfront.net",
+        "printemps.com", "media-cdn.printemps.com",
+        "laredoute.", "asos.", "footpatrol.", "bstn.",
     ]
     
     if not any(domain in url.lower() for domain in allowed_domains):
