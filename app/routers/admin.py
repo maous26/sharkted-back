@@ -762,6 +762,10 @@ queue_default = Queue("default", connection=redis_conn)
 
 @router.post("/scrape")
 @router.get("/scrape")
+@router.post("/actualisation") # Alias for broken link
+@router.get("/actualisation")  # Alias for broken link
+@router.post("/actuaisation")  # Common misspelling
+@router.get("/actuaisation")   # Common misspelling
 def admin_run_scraping(
     background_tasks: BackgroundTasks,
     sources: Optional[List[str]] = Query(None),
@@ -804,6 +808,10 @@ def admin_run_scraping(
 
 @router.post("/rescrape")
 @router.get("/rescrape")
+@router.post("/rescarping")  # Alias for broken link
+@router.get("/rescarping")   # Alias for broken link
+@router.post("/rescrapping") # Common misspelling
+@router.get("/rescrapping")  # Common misspelling
 def admin_rescrape_vinted(
     limit: int = Query(50),
     force: bool = Query(False),
