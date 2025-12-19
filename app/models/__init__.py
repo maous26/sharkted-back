@@ -4,8 +4,10 @@ from app.models.vinted_stats import VintedStats
 from app.models.deal_score import DealScore
 from app.models.proxy_settings import ProxySettings
 from app.models.subscription import SubscriptionTier, get_tier_limits, get_tier_sources, get_user_tier
+from app.models.discord_webhook import DiscordWebhook
 
 __all__ = [
     'User', 'Deal', 'VintedStats', 'DealScore', 'ProxySettings', 'Base',
-    'SubscriptionTier', 'get_tier_limits', 'get_tier_sources', 'get_user_tier'
+    'SubscriptionTier', 'get_tier_limits', 'get_tier_sources', 'get_user_tier',
+    'DiscordWebhook'
 ]

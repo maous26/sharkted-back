@@ -15,6 +15,10 @@ class User(Base):
     plan: Mapped[str] = mapped_column(String(20), default="free", nullable=True)
     preferences: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, default=None)
 
+    # Discord integration
+    discord_id: Mapped[Optional[str]] = mapped_column(String(50), unique=True, nullable=True, index=True)
+    discord_username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
     @property
     def is_admin(self) -> bool:
         return self.email == "admin@sharkted.fr" or self.plan in ("PRO", "AGENCY")

@@ -251,10 +251,54 @@ def scrape_source(source: str, max_products: int = 50, min_score: int = MIN_SCOR
     }
 
 
+def send_discord_alerts_for_new_deals(deal_ids: List[int]) -> Dict[str, int]:
+    """Envoie les alertes Discord pour les nouveaux deals, filtrees par tier."""
+    from app.db.session import SessionLocal
+    from app.services.discord_service import send_deal_alert
+
+    session = SessionLocal()
+    sent_counts = {"freemium": 0, "basic": 0, "premium": 0, "admin": 0}
+
+    try:
+        for deal_id in deal_ids:
+            deal = session.query(Deal).filter(Deal.id == deal_id).first()
+            score = session.query(DealScore).filter(DealScore.deal_id == deal_id).first()
+            if not deal or not score:
+                continue
+
+            deal_data = {
+                "title": deal.title,
+                "url": deal.product_url,
+                "price": deal.sale_price,
+                "source": deal.source,
+                "brand": deal.brand,
+                "image_url": deal.image_url,
+                "score": score.flip_score or 0,
+                "margin_euro": getattr(score, 'estimated_margin', None),
+            }
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(send_deal_alert(deal_data))
+                for tier, count in result.items():
+                    sent_counts[tier] += count
+            finally:
+                loop.close()
+
+    except Exception as e:
+        logger.error(f"Discord alert error: {e}")
+    finally:
+        session.close()
+
+    return sent_counts
+
+
 def scrape_all_sources(
     sources: Optional[List[str]] = None,
     max_products_per_source: int = 30,
     min_score: int = MIN_SCORE,
+    send_alerts: bool = True,
 ) -> Dict:
     """Scrape toutes les sources avec scoring autonome."""
     trace_id = set_trace_id()
@@ -283,12 +327,34 @@ def scrape_all_sources(
         
         random_delay(source, multiplier=1.5)
     
+    # Discord alerts for new deals (filtered by tier)
+    discord_sent = {"freemium": 0, "basic": 0, "premium": 0, "admin": 0}
+    if send_alerts and total_new > 0:
+        try:
+            # Get recent new deals from DB
+            from app.db.session import SessionLocal
+            from datetime import timedelta
+            session = SessionLocal()
+            try:
+                recent_deals = session.query(Deal).filter(
+                    Deal.created_at >= datetime.utcnow() - timedelta(minutes=30)
+                ).order_by(Deal.created_at.desc()).limit(total_new).all()
+                new_deal_ids = [d.id for d in recent_deals]
+                if new_deal_ids:
+                    discord_sent = send_discord_alerts_for_new_deals(new_deal_ids)
+                    logger.info(f"Discord alerts sent", alerts=discord_sent)
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Discord alerts failed: {e}")
+
     return {
         "status": "completed",
         "sources_scraped": len(results),
         "total_new": total_new,
         "total_skipped": total_skipped,
         "duration_seconds": round(time.perf_counter() - start_time, 2),
+        "discord_alerts": discord_sent,
         "results": results,
     }
 

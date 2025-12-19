@@ -338,7 +338,7 @@ def get_available_categories():
 def get_subscription_tiers():
     """Get all subscription tiers and their features."""
     from app.core.subscription_tiers import SubscriptionTier, TIER_LIMITS, FREE_SOURCES, PREMIUM_SOURCES
-    
+
     tiers = []
     for tier in SubscriptionTier:
         limits = TIER_LIMITS[tier]
@@ -354,9 +354,103 @@ def get_subscription_tiers():
                 "export_enabled": limits.export_enabled,
             },
         })
-    
+
     return {
         "tiers": tiers,
         "free_sources": list(FREE_SOURCES),
         "premium_sources": list(PREMIUM_SOURCES),
+    }
+
+
+# =============================================================================
+# DISCORD OAUTH - Liaison de compte
+# =============================================================================
+
+@router.get("/discord/link")
+def get_discord_link_url(request: Request, db: Session = Depends(get_db)):
+    """
+    Get Discord OAuth URL to link account.
+    The state contains the user ID for verification.
+    """
+    from app.services.discord_service import get_oauth_url
+    import secrets
+
+    user = get_current_user_from_request(request, db)
+
+    # Generate state with user ID
+    state = f"{user.id}:{secrets.token_urlsafe(16)}"
+
+    return {
+        "oauth_url": get_oauth_url(state),
+        "state": state,
+    }
+
+
+class DiscordCallbackIn(BaseModel):
+    code: str
+    state: str
+
+
+@router.post("/discord/callback")
+async def discord_callback(
+    payload: DiscordCallbackIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Handle Discord OAuth callback.
+    Links the Discord account to the current user.
+    """
+    from app.services.discord_service import link_discord_account
+
+    user = get_current_user_from_request(request, db)
+
+    # Verify state contains correct user ID
+    try:
+        state_user_id = int(payload.state.split(":")[0])
+        if state_user_id != user.id:
+            raise HTTPException(status_code=400, detail="Invalid state")
+    except (ValueError, IndexError):
+        raise HTTPException(status_code=400, detail="Invalid state format")
+
+    result = await link_discord_account(user.id, payload.code)
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to link Discord"))
+
+    return {
+        "success": True,
+        "discord_id": result.get("discord_id"),
+        "discord_username": result.get("discord_username"),
+        "tier": result.get("tier"),
+        "message": "Discord account linked successfully",
+    }
+
+
+@router.delete("/discord/unlink")
+async def unlink_discord(request: Request, db: Session = Depends(get_db)):
+    """Unlink Discord account from current user."""
+    from app.services.discord_service import unlink_discord_account
+
+    user = get_current_user_from_request(request, db)
+
+    if not user.discord_id:
+        raise HTTPException(status_code=400, detail="No Discord account linked")
+
+    success = await unlink_discord_account(user.id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to unlink Discord")
+
+    return {"success": True, "message": "Discord account unlinked"}
+
+
+@router.get("/discord/status")
+def get_discord_status(request: Request, db: Session = Depends(get_db)):
+    """Get Discord link status for current user."""
+    user = get_current_user_from_request(request, db)
+
+    return {
+        "linked": user.discord_id is not None,
+        "discord_id": user.discord_id,
+        "discord_username": user.discord_username,
     }

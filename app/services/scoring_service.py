@@ -283,23 +283,42 @@ class ScoringEngineV3:
         brand: Optional[str]
     ) -> Dict[str, float]:
         """
-        Estime le prix de revente sans Vinted.
-        Basé sur le prix original et le multiplicateur de la marque.
+        Estime le prix de revente RÉALISTE sur Vinted.
+
+        RÈGLE CLÉ: Un produit soldé se revend sur Vinted comme "neuf avec étiquette"
+        à environ 70-85% du prix ORIGINAL (pas du prix soldé!).
+
+        Mais si le prix soldé est déjà proche de ce niveau, la marge sera faible.
         """
         brand_info = self._get_brand_info(brand)
-        multiplier = brand_info["resale_multiplier"]
-        
-        # Le prix de revente estimé est basé sur le prix original
-        # (ce que les gens sont prêts à payer pour du neuf)
-        # Utiliser sale_price si original_price est 0 ou None
-        base_price = original_price if original_price and original_price > 0 else sale_price
-        estimated_resale = base_price * multiplier
-        
+        tier = brand_info.get("tier", "B")
+
+        # Prix de revente sur Vinted = % du prix original selon la marque
+        # Ces % sont basés sur les données réelles Vinted
+        vinted_resale_pct = {
+            "S": 0.82,  # Nike/Jordan: 82% du retail = prix Vinted neuf
+            "A": 0.75,  # Adidas/NB: 75% du retail
+            "B": 0.65,  # Puma/Reebok: 65% du retail
+            "C": 0.55,  # Kappa etc: 55% du retail
+            "X": 0.40,  # Marques exclues: très faible
+        }
+
+        resale_factor = vinted_resale_pct.get(tier, 0.65)
+
+        # Prix de revente estimé basé sur le prix ORIGINAL
+        base_price = original_price if original_price and original_price > 0 else sale_price * 1.3
+        estimated_resale = base_price * resale_factor
+
+        # IMPORTANT: Le prix de revente ne peut pas être inférieur au prix d'achat + 10%
+        # (sinon on perd de l'argent)
+        min_resale = sale_price * 1.10
+        estimated_resale = max(estimated_resale, min_resale)
+
         # Différentes stratégies de prix
         return {
-            "aggressive": round(estimated_resale * 0.85, 2),  # Vente rapide -15%
-            "optimal": round(estimated_resale * 0.92, 2),     # Prix équilibré -8%
-            "patient": round(estimated_resale * 0.98, 2),     # Prix max -2%
+            "aggressive": round(estimated_resale * 0.92, 2),  # Vente rapide -8%
+            "optimal": round(estimated_resale, 2),            # Prix équilibré
+            "patient": round(estimated_resale * 1.05, 2),     # Prix max +5%
             "estimated_resale": round(estimated_resale, 2),
         }
     
@@ -354,23 +373,43 @@ class ScoringEngineV3:
         # Marge estimée
         margin_euro, margin_pct = self.calculate_estimated_margin(original_price, sale_price, brand)
         
-        # Bonus/malus marge estimée
+        # Bonus/malus marge estimée - CRITIQUE pour la rentabilité
         margin_bonus = 0
         if margin_pct >= 30:
-            margin_bonus = 10
+            margin_bonus = 15  # Excellente marge
         elif margin_pct >= 20:
-            margin_bonus = 5
-        elif margin_pct < 0:
-            margin_bonus = -10
-        
+            margin_bonus = 10  # Bonne marge
+        elif margin_pct >= 10:
+            margin_bonus = 5   # Marge correcte
+        elif margin_pct >= 0:
+            margin_bonus = 0   # Marge nulle
+        elif margin_pct >= -10:
+            margin_bonus = -15 # Petite perte
+        elif margin_pct >= -20:
+            margin_bonus = -25 # Perte significative
+        else:
+            margin_bonus = -40 # Grosse perte - deal à éviter
+
         # Score final pondéré
         flip_score = (
-            discount_score * 0.40 +
-            brand_score * 0.30 +
-            contextual_score * 0.30 +
-            margin_bonus
+            discount_score * 0.30 +   # Réduit à 30%
+            brand_score * 0.25 +      # Réduit à 25%
+            contextual_score * 0.20 + # Réduit à 20%
+            margin_bonus              # Le reste vient de la marge
         )
-        
+
+        # Ajouter un score de marge explicite (0-25 points)
+        if margin_pct >= 25:
+            flip_score += 25
+        elif margin_pct >= 15:
+            flip_score += 20
+        elif margin_pct >= 10:
+            flip_score += 15
+        elif margin_pct >= 5:
+            flip_score += 10
+        elif margin_pct >= 0:
+            flip_score += 5
+
         flip_score = min(max(flip_score, 0), 100)
         
         components = {

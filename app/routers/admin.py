@@ -527,6 +527,7 @@ def get_default_proxy(proxy_type: str):
 
 from app.services.proxy_decision_service import get_usage_stats, get_active_premium_count
 from app.models.proxy_usage import ProxyUsage
+from app.models.discord_webhook import DiscordWebhook
 
 
 @router.get("/proxy-costs")
@@ -743,7 +744,7 @@ def get_web_unlocker_requests(limit: int = 50):
 def get_scraping_stats():
     """
     Retourne les statistiques complètes de scraping.
-    
+
     Inclut stats orchestrateur + Web Unlocker.
     """
     try:
@@ -751,3 +752,236 @@ def get_scraping_stats():
         return get_premium_scraping_stats()
     except Exception as e:
         return {"error": str(e)}
+
+
+# =============================================================================
+# DISCORD WEBHOOKS - Par niveau d'abonnement
+# =============================================================================
+
+class DiscordWebhookUpdate(BaseModel):
+    webhook_url: Optional[str] = None
+    enabled: Optional[bool] = None
+    send_after_scan: Optional[bool] = None
+    min_score: Optional[int] = None
+    send_daily_summary: Optional[bool] = None
+
+
+class TierWebhooksUpdate(BaseModel):
+    freemium: Optional[str] = None
+    basic: Optional[str] = None
+    premium: Optional[str] = None
+    admin: Optional[str] = None
+
+
+@router.get("/discord-webhooks")
+def get_discord_webhooks(current_admin: dict = Depends(get_current_admin)):
+    """Get all Discord webhook configurations by tier."""
+    session = SessionLocal()
+    try:
+        webhooks = session.query(DiscordWebhook).all()
+
+        # Return as dict keyed by tier
+        result = {
+            "freemium": None,
+            "basic": None,
+            "premium": None,
+            "admin": None,
+        }
+
+        for wh in webhooks:
+            result[wh.tier] = wh.to_dict()
+
+        return result
+    finally:
+        session.close()
+
+
+@router.put("/discord-webhooks")
+def update_all_discord_webhooks(
+    payload: TierWebhooksUpdate,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Update Discord webhooks for all tiers at once."""
+    session = SessionLocal()
+    try:
+        tiers = ["freemium", "basic", "premium", "admin"]
+        results = {}
+
+        for tier in tiers:
+            webhook_url = getattr(payload, tier)
+
+            # Find or create webhook for this tier
+            webhook = session.query(DiscordWebhook).filter(
+                DiscordWebhook.tier == tier
+            ).first()
+
+            if webhook:
+                # Update existing
+                if webhook_url is not None:
+                    webhook.webhook_url = webhook_url if webhook_url else None
+            else:
+                # Create new
+                webhook = DiscordWebhook(
+                    tier=tier,
+                    webhook_url=webhook_url if webhook_url else None,
+                    enabled=True,
+                    send_after_scan=True,
+                    min_score=70,
+                    send_daily_summary=False,
+                )
+                session.add(webhook)
+
+            results[tier] = {
+                "webhook_url": webhook_url,
+                "updated": True,
+            }
+
+        session.commit()
+
+        logger.info(f"Discord webhooks updated by {current_admin['email']}")
+
+        return {
+            "message": "Webhooks updated successfully",
+            "results": results,
+        }
+    finally:
+        session.close()
+
+
+@router.put("/discord-webhooks/{tier}")
+def update_discord_webhook(
+    tier: str,
+    payload: DiscordWebhookUpdate,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Update Discord webhook for a specific tier."""
+    valid_tiers = ["freemium", "basic", "premium", "admin"]
+    if tier not in valid_tiers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid tier. Must be one of: {valid_tiers}"
+        )
+
+    session = SessionLocal()
+    try:
+        webhook = session.query(DiscordWebhook).filter(
+            DiscordWebhook.tier == tier
+        ).first()
+
+        if not webhook:
+            # Create new
+            webhook = DiscordWebhook(tier=tier)
+            session.add(webhook)
+
+        # Update fields
+        update_data = payload.model_dump(exclude_unset=True)
+        for key, value in update_data.items():
+            setattr(webhook, key, value)
+
+        session.commit()
+        session.refresh(webhook)
+
+        logger.info(f"Discord webhook for {tier} updated by {current_admin['email']}")
+
+        return webhook.to_dict()
+    finally:
+        session.close()
+
+
+@router.post("/discord-webhooks/{tier}/test")
+async def test_discord_webhook(
+    tier: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Test a Discord webhook by sending a test message."""
+    import httpx
+
+    valid_tiers = ["freemium", "basic", "premium", "admin"]
+    if tier not in valid_tiers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid tier. Must be one of: {valid_tiers}"
+        )
+
+    session = SessionLocal()
+    try:
+        webhook = session.query(DiscordWebhook).filter(
+            DiscordWebhook.tier == tier
+        ).first()
+
+        if not webhook or not webhook.webhook_url:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No webhook configured for tier: {tier}"
+            )
+
+        # Send test message
+        test_payload = {
+            "embeds": [{
+                "title": "Test Sharkted Alert",
+                "description": f"This is a test message for the **{tier.upper()}** tier webhook.",
+                "color": 0x00ff00,  # Green
+                "fields": [
+                    {"name": "Tier", "value": tier.upper(), "inline": True},
+                    {"name": "Status", "value": "Working", "inline": True},
+                ],
+                "footer": {"text": "Sharkted Alert System"}
+            }]
+        }
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                webhook.webhook_url,
+                json=test_payload
+            )
+
+            if response.status_code == 204:
+                return {
+                    "status": "success",
+                    "tier": tier,
+                    "message": "Test message sent successfully"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "tier": tier,
+                    "status_code": response.status_code,
+                    "error": response.text
+                }
+    except httpx.RequestError as e:
+        return {
+            "status": "error",
+            "tier": tier,
+            "error": str(e)
+        }
+    finally:
+        session.close()
+
+
+@router.get("/discord-webhooks/{tier}")
+def get_discord_webhook(tier: str, current_admin: dict = Depends(get_current_admin)):
+    """Get Discord webhook configuration for a specific tier."""
+    valid_tiers = ["freemium", "basic", "premium", "admin"]
+    if tier not in valid_tiers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid tier. Must be one of: {valid_tiers}"
+        )
+
+    session = SessionLocal()
+    try:
+        webhook = session.query(DiscordWebhook).filter(
+            DiscordWebhook.tier == tier
+        ).first()
+
+        if not webhook:
+            return {
+                "tier": tier,
+                "webhook_url": None,
+                "enabled": False,
+                "message": "No webhook configured for this tier"
+            }
+
+        return webhook.to_dict()
+    finally:
+        session.close()

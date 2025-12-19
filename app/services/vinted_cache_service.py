@@ -26,11 +26,14 @@ def get_redis():
     return redis.from_url(REDIS_URL)
 
 
-def get_cache_key(query: str) -> str:
+def get_cache_key(query: str, new_with_tags: bool = True) -> str:
+    """Génère une clé de cache unique pour la requête."""
     normalized = query.lower().strip()
     normalized = re.sub(r'[^a-z0-9\s]', '', normalized)
     normalized = ' '.join(normalized.split())
-    hash_key = hashlib.md5(normalized.encode()).hexdigest()[:12]
+    # Ajouter le filtre dans la clé pour différencier les caches
+    suffix = "_nwt" if new_with_tags else "_all"
+    hash_key = hashlib.md5((normalized + suffix).encode()).hexdigest()[:12]
     return f"vinted:stats:{hash_key}"
 
 
@@ -137,10 +140,13 @@ class VintedBatchScraper:
             time.sleep(self._min_delay - elapsed)
         
         try:
+            # Filtrer UNIQUEMENT les produits "Neuf avec étiquette" (status_id=6)
+            # Cela donne des prix comparables aux produits soldés qu'on revend
             params = {
                 "search_text": query,
                 "per_page": limit,
                 "order": "newest_first",
+                "status_ids[]": "6",  # 6 = Neuf avec étiquette
             }
             
             with self._get_client() as client:
@@ -211,6 +217,8 @@ class VintedBatchScraper:
             "query_used": query,
             "sample_listings": sample_listings,
             "fetched_at": datetime.utcnow().isoformat(),
+            "condition": "new_with_tags",  # Confirme que c'est du neuf avec étiquette
+            "source_type": "vinted_real",  # Données réelles Vinted
         }
         
         if n >= 4:

@@ -37,7 +37,11 @@ class VintedStats(Base):
     
     # Requête utilisée
     search_query: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    
+
+    # Source et condition des données
+    source_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # "vinted_real" = données réelles
+    condition: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # "new_with_tags" = neuf avec étiquette
+
     # Timestamps
     computed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
