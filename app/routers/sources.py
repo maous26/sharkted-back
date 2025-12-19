@@ -246,7 +246,7 @@ def delete_log(log_id: str):
 
 
 @router.delete("/logs")
-def delete_old_logs(older_than_days: int = Query(..., ge=1)):
+def delete_old_logs(older_than_days: int = Query(..., ge=0)):
     """Delete logs older than specified days."""
     deleted = delete_old_scraping_logs(older_than_days)
     return {"message": f"Deleted {deleted} logs older than {older_than_days} days"}

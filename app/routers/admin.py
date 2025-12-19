@@ -2,7 +2,8 @@
 Admin Router - Administration endpoints.
 Endpoints: /v1/admin/*
 """
-from fastapi import APIRouter, HTTPException, Depends
+
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import text
 from pydantic import BaseModel
@@ -32,28 +33,44 @@ router = APIRouter(prefix="/v1/admin", tags=["admin"])
 bearer = HTTPBearer(auto_error=False)
 
 
-def get_current_admin(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
-    """Verify admin access with logging."""
+def get_current_admin(
+    request: Request,
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)
+) -> dict:
+    """Verify admin access with logging (Head or Cookie)."""
     logger.info(f"get_current_admin called")
-    if not creds:
+    
+    token = None
+    if creds:
+        token = creds.credentials
+    else:
+        # Fallback to cookie
+        token = request.cookies.get("access_token")
+        
+    if not token:
         logger.warning("No credentials provided")
         raise HTTPException(status_code=401, detail="Missing token")
+        
     try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
         email = payload.get("sub")
         logger.info(f"Token decoded for: {email}")
         if not email:
             raise HTTPException(status_code=401, detail="Invalid token")
+            
         session = SessionLocal()
         try:
             user = session.query(User).filter(User.email == email).first()
             if not user:
                 logger.warning(f"User not found: {email}")
                 raise HTTPException(status_code=401, detail="User not found")
+            
             is_admin = user.email == "admin@sharkted.fr" or (user.plan or "").lower() in ("pro", "agency", "owner", "premium")
             logger.info(f"User {email} plan={user.plan} is_admin={is_admin}")
+            
             if not is_admin:
                 raise HTTPException(status_code=403, detail="Admin access required")
+                
             return {"user_id": user.id, "email": user.email, "is_admin": True}
         finally:
             session.close()
@@ -62,37 +79,13 @@ def get_current_admin(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> 
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-def get_current_admin_with_log(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
-    """Verify admin access by checking the database."""
-    if not creds:
-        raise HTTPException(status_code=401, detail="Missing token")
-    try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGO])
-        email = payload.get("sub")
-        if not email:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        
-        # Check admin status from database
-        session = SessionLocal()
-        try:
-            user = session.query(User).filter(User.email == email).first()
-            if not user:
-                raise HTTPException(status_code=401, detail="User not found")
-            
-            # Check if admin
-            is_admin = user.email == "admin@sharkted.fr" or (user.plan or "").lower() in ("pro", "agency", "owner", "premium")
-            if not is_admin:
-                raise HTTPException(status_code=403, detail="Admin access required")
-            
-            return {
-                "user_id": user.id,
-                "email": user.email,
-                "is_admin": True,
-            }
-        finally:
-            session.close()
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+def get_current_admin_with_log(
+    request: Request,
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)
+) -> dict:
+    """Verify admin access by checking the database (Head or Cookie)."""
+    # Reuse the main function logic since it already does everything effectively
+    return get_current_admin(request, creds)
 
 # =============================================================================
 # STATS
@@ -751,3 +744,123 @@ def get_scraping_stats():
         return get_premium_scraping_stats()
     except Exception as e:
         return {"error": str(e)}
+
+
+# =============================================================================
+# ADMIN ACTIONS (Fixes for "Liens qui ne fonctionnent pas")
+# =============================================================================
+
+from rq import Queue
+import redis
+import os
+from fastapi import BackgroundTasks, Query
+
+# Redis connection for admin actions
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+redis_conn = redis.from_url(REDIS_URL)
+queue_default = Queue("default", connection=redis_conn)
+
+@router.post("/scrape")
+@router.get("/scrape")
+def admin_run_scraping(
+    background_tasks: BackgroundTasks,
+    sources: Optional[List[str]] = Query(None),
+    max_products: int = 30,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Lance le scraping des sources (Action 'Actualisation').
+    Supporte GET pour les liens directs et POST pour les formulaires.
+    """
+    from app.jobs_scraping import scrape_all_sources
+    from app.services.scraping_service import get_enabled_sources
+    from app.core.source_policy import SOURCE_POLICIES
+    
+    # Déterminer les sources
+    if sources:
+        sources_to_scrape = [s for s in sources if s in SOURCE_POLICIES]
+    else:
+        sources_to_scrape = get_enabled_sources()
+    
+    if not sources_to_scrape:
+        return {"status": "error", "message": "No enabled sources to scrape"}
+    
+    # Enqueue le job
+    job = queue_default.enqueue(
+        scrape_all_sources,
+        sources_to_scrape,
+        max_products,
+        job_timeout=1800,
+        result_ttl=3600,
+    )
+    
+    return {
+        "status": "enqueued",
+        "job_id": job.id,
+        "action": "scrape",
+        "message": f"Scraping started for {len(sources_to_scrape)} source(s)"
+    }
+
+
+@router.post("/rescrape")
+@router.get("/rescrape")
+def admin_rescrape_vinted(
+    limit: int = Query(50),
+    force: bool = Query(False),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Lance le rescoring (Action 'Rescarping').
+    Supporte GET pour les liens directs et POST pour les formulaires.
+    """
+    from app.jobs_scoring import rescore_deals_batch
+    
+    job = queue_default.enqueue(
+        rescore_deals_batch,
+        limit,
+        force,
+        job_timeout=1800,
+        result_ttl=3600,
+    )
+    
+    return {
+        "status": "enqueued",
+        "job_id": job.id,
+        "action": "rescrape",
+        "message": f"Rescraping Vinted stats for up to {limit} deals"
+    }
+
+
+@router.post("/update")
+@router.get("/update")
+def admin_global_update(current_admin: dict = Depends(get_current_admin)):
+    """
+    Action globale d'actualisation.
+    Lance le scraping et reload les proxies.
+    """
+    # 1. Reload proxies
+    from app.services.proxy_service import get_proxy_pool
+    pool = get_proxy_pool()
+    pool.initialize()
+    
+    # 2. Trigger scrape
+    from app.jobs_scraping import scrape_all_sources
+    from app.services.scraping_service import get_enabled_sources
+    
+    sources_to_scrape = get_enabled_sources()
+    job = None
+    if sources_to_scrape:
+        job = queue_default.enqueue(
+            scrape_all_sources,
+            sources_to_scrape,
+            30, # default max products
+            job_timeout=1800,
+            result_ttl=3600,
+        )
+    
+    return {
+        "status": "success",
+        "message": "Global update initiated (Proxies reloaded + Scraping started)",
+        "proxies_stats": pool.get_stats(),
+        "scrape_job": job.id if job else None
+    }
